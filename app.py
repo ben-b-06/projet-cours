@@ -81,8 +81,35 @@ def init_db():
             slot_time TEXT NOT NULL,
             duration_minutes INTEGER NOT NULL
         );
+
+        -- Historique des mises en relation élève/prof : rempli dès qu'une
+        -- réservation est faite et jamais supprimé, pour permettre la
+        -- messagerie même après une éventuelle désinscription.
+        CREATE TABLE IF NOT EXISTS contacts(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            course_id INTEGER REFERENCES courses(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(student_id, teacher_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS messages(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            body TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            read_at TEXT
+        );
         """
     )
+
+    # Migration : ajoute la colonne des sujets à travailler si elle n'existe pas déjà
+    # (les bases créées avant cette fonctionnalité n'ont pas encore cette colonne).
+    existing_columns = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
+    if "student_notes" not in existing_columns:
+        db.execute("ALTER TABLE courses ADD COLUMN student_notes TEXT")
 
     # Le compte admin est toujours garanti d'exister, avec des identifiants fixes.
     admin_row = db.execute("SELECT id FROM users WHERE email = ?", (ADMIN_EMAIL,)).fetchone()
@@ -164,6 +191,22 @@ def seed(db):
                 "UPDATE courses SET reserved_by = ? WHERE id = ?",
                 (ids["lea@coursconnect.fr"], course_id),
             )
+            db.execute(
+                "INSERT OR IGNORE INTO contacts(student_id, teacher_id, course_id) VALUES (?, ?, ?)",
+                (ids["lea@coursconnect.fr"], teacher_id, course_id),
+            )
+
+    # Un petit échange de démonstration pour illustrer la messagerie.
+    db.execute(
+        "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
+        (ids["lea@coursconnect.fr"], ids["camille@coursconnect.fr"],
+         "Bonjour, avant notre premier cours, pourriez-vous me confirmer si nous verrons les fractions ?"),
+    )
+    db.execute(
+        "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
+        (ids["camille@coursconnect.fr"], ids["lea@coursconnect.fr"],
+         "Bonjour Léa, oui tout à fait, on commencera justement par les fractions."),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -284,30 +327,64 @@ def presentation():
 def cours():
     db = get_db()
     user = current_user()
+
+    q = request.args.get("q", "").strip()
+    subject = request.args.get("subject", "").strip()
+    level = request.args.get("level", "").strip()
+    teacher_id = request.args.get("teacher_id", "").strip()
+
+    conditions = []
+    params = []
+
     if user and user["role"] == "etudiant":
-        rows = db.execute(
-            """
-            SELECT c.*, u.name AS teacher_name
-            FROM courses c
-            JOIN users u ON u.id = c.teacher_id
-            WHERE c.reserved_by IS NULL OR c.reserved_by = ?
-            ORDER BY c.id DESC
-            """,
-            (user["id"],),
-        ).fetchall()
+        conditions.append("(c.reserved_by IS NULL OR c.reserved_by = ?)")
+        params.append(user["id"])
     else:
-        rows = db.execute(
-            """
-            SELECT c.*, u.name AS teacher_name
-            FROM courses c
-            JOIN users u ON u.id = c.teacher_id
-            WHERE c.reserved_by IS NULL
-            ORDER BY c.id DESC
-            """
-        ).fetchall()
+        conditions.append("c.reserved_by IS NULL")
+
+    if q:
+        conditions.append("(c.title LIKE ? OR c.description LIKE ?)")
+        like = f"%{q}%"
+        params.extend([like, like])
+
+    if subject in MATIERES:
+        conditions.append("c.subject = ?")
+        params.append(subject)
+
+    if level in NIVEAUX:
+        conditions.append("c.level = ?")
+        params.append(level)
+
+    if teacher_id.isdigit():
+        conditions.append("c.teacher_id = ?")
+        params.append(int(teacher_id))
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+    rows = db.execute(
+        f"""
+        SELECT c.*, u.name AS teacher_name
+        FROM courses c
+        JOIN users u ON u.id = c.teacher_id
+        WHERE {where_clause}
+        ORDER BY c.id DESC
+        """,
+        params,
+    ).fetchall()
+
+    teachers = db.execute(
+        "SELECT id, name FROM users WHERE role = 'prof' ORDER BY name"
+    ).fetchall()
 
     slots_map = get_slots_map(db, [r["id"] for r in rows])
-    return render_template("cours.html", courses=rows, slots_map=slots_map)
+    return render_template(
+        "cours.html",
+        courses=rows,
+        slots_map=slots_map,
+        matieres=MATIERES,
+        niveaux=NIVEAUX,
+        teachers=teachers,
+        filters={"q": q, "subject": subject, "level": level, "teacher_id": teacher_id},
+    )
 
 
 @app.route("/cours/<int:course_id>/inscription", methods=["POST"])
@@ -315,14 +392,21 @@ def cours():
 def inscription_cours(course_id):
     db = get_db()
     course = db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone()
+    notes = request.form.get("notes", "").strip()
     if not course:
         flash("Cours introuvable.", "error")
     elif course["reserved_by"] is not None:
         flash("Ce cours vient d'être réservé par un autre élève.", "error")
     else:
         db.execute(
-            "UPDATE courses SET reserved_by = ? WHERE id = ? AND reserved_by IS NULL",
-            (current_user()["id"], course_id),
+            "UPDATE courses SET reserved_by = ?, student_notes = ? WHERE id = ? AND reserved_by IS NULL",
+            (current_user()["id"], notes or None, course_id),
+        )
+        # On garde une trace durable de la mise en relation élève/prof pour la
+        # messagerie, même si l'élève se désinscrit plus tard.
+        db.execute(
+            "INSERT OR IGNORE INTO contacts(student_id, teacher_id, course_id) VALUES (?, ?, ?)",
+            (current_user()["id"], course["teacher_id"], course_id),
         )
         db.commit()
         flash("Cours réservé ! Retrouvez-le dans « Mes cours ».", "success")
@@ -731,6 +815,146 @@ def prof_calendrier():
         next_link=url_for("prof_calendrier", year=next_year, month=next_month),
         today_link=url_for("prof_calendrier"),
         role_mode="prof",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes — Messagerie
+# ---------------------------------------------------------------------------
+def get_contacts(user):
+    """Retourne la liste des correspondants autorisés (profs pour un élève,
+    élèves pour un prof), avec le nombre de messages non lus et un aperçu
+    du dernier message échangé."""
+    db = get_db()
+    if user["role"] == "etudiant":
+        rows = db.execute(
+            """
+            SELECT u.id, u.name, u.role
+            FROM contacts ct
+            JOIN users u ON u.id = ct.teacher_id
+            WHERE ct.student_id = ?
+            GROUP BY u.id
+            ORDER BY u.name
+            """,
+            (user["id"],),
+        ).fetchall()
+    elif user["role"] == "prof":
+        rows = db.execute(
+            """
+            SELECT u.id, u.name, u.role
+            FROM contacts ct
+            JOIN users u ON u.id = ct.student_id
+            WHERE ct.teacher_id = ?
+            GROUP BY u.id
+            ORDER BY u.name
+            """,
+            (user["id"],),
+        ).fetchall()
+    else:
+        return []
+
+    contacts = []
+    for r in rows:
+        last = db.execute(
+            """
+            SELECT body, created_at, sender_id FROM messages
+            WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+            ORDER BY id DESC LIMIT 1
+            """,
+            (user["id"], r["id"], r["id"], user["id"]),
+        ).fetchone()
+        unread = db.execute(
+            "SELECT COUNT(*) FROM messages WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
+            (r["id"], user["id"]),
+        ).fetchone()[0]
+        contacts.append({"id": r["id"], "name": r["name"], "role": r["role"], "last": last, "unread": unread})
+    contacts.sort(key=lambda c: (c["last"]["created_at"] if c["last"] else ""), reverse=True)
+    return contacts
+
+
+def is_allowed_contact(user, other_id):
+    db = get_db()
+    if user["role"] == "etudiant":
+        row = db.execute(
+            "SELECT 1 FROM contacts WHERE student_id = ? AND teacher_id = ?",
+            (user["id"], other_id),
+        ).fetchone()
+    elif user["role"] == "prof":
+        row = db.execute(
+            "SELECT 1 FROM contacts WHERE teacher_id = ? AND student_id = ?",
+            (user["id"], other_id),
+        ).fetchone()
+    else:
+        row = None
+    return row is not None
+
+
+@app.context_processor
+def inject_unread_total():
+    user = current_user()
+    if user and user["role"] in ("prof", "etudiant"):
+        total = get_db().execute(
+            "SELECT COUNT(*) FROM messages WHERE recipient_id = ? AND read_at IS NULL",
+            (user["id"],),
+        ).fetchone()[0]
+        return {"unread_messages_total": total}
+    return {"unread_messages_total": 0}
+
+
+@app.route("/messagerie")
+@login_required()
+def messagerie():
+    user = current_user()
+    if user["role"] not in ("prof", "etudiant"):
+        flash("La messagerie est réservée aux professeurs et aux élèves.", "error")
+        return redirect(dashboard_url_for(user["role"]))
+    contacts = get_contacts(user)
+    return render_template("messagerie.html", contacts=contacts)
+
+
+@app.route("/messagerie/<int:contact_id>", methods=["GET", "POST"])
+@login_required()
+def messagerie_conversation(contact_id):
+    user = current_user()
+    if user["role"] not in ("prof", "etudiant"):
+        flash("La messagerie est réservée aux professeurs et aux élèves.", "error")
+        return redirect(dashboard_url_for(user["role"]))
+
+    db = get_db()
+    contact = db.execute("SELECT * FROM users WHERE id = ?", (contact_id,)).fetchone()
+    if not contact or not is_allowed_contact(user, contact_id):
+        flash("Vous ne pouvez échanger qu'avec un professeur ou un élève avec qui un cours a été réservé.", "error")
+        return redirect(url_for("messagerie"))
+
+    if request.method == "POST":
+        body = request.form.get("body", "").strip()
+        if body:
+            db.execute(
+                "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
+                (user["id"], contact_id, body),
+            )
+            db.commit()
+        return redirect(url_for("messagerie_conversation", contact_id=contact_id))
+
+    # Marque comme lus les messages reçus de ce correspondant.
+    db.execute(
+        "UPDATE messages SET read_at = CURRENT_TIMESTAMP WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
+        (contact_id, user["id"]),
+    )
+    db.commit()
+
+    thread = db.execute(
+        """
+        SELECT * FROM messages
+        WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+        ORDER BY id ASC
+        """,
+        (user["id"], contact_id, contact_id, user["id"]),
+    ).fetchall()
+
+    contacts = get_contacts(user)
+    return render_template(
+        "messagerie.html", contacts=contacts, active_contact=contact, thread=thread
     )
 
 
