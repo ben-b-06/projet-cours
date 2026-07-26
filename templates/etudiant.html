@@ -15,8 +15,14 @@
       <h3>{{ c['title'] }}</h3>
       <p class="course-desc">{{ c['description'] }}</p>
       {{ macros.slot_list(slots_map.get(c['id'], [])) }}
+      {% if c['student_notes'] %}
+        <p style="font-size:0.82rem;color:var(--text-muted);background:var(--paper);padding:0.5rem 0.7rem;border-radius:8px;margin:0;">
+          <strong>Sujets à travailler :</strong> {{ c['student_notes'] }}
+        </p>
+      {% endif %}
       <div class="course-meta">
         <span>Par {{ c['teacher_name'] }}</span>
+        <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('messagerie_conversation', contact_id=c['teacher_id']) }}">Écrire au prof</a>
         <form method="post" action="{{ url_for('desinscription_cours', course_id=c['id']) }}">
           <button class="btn-danger-outline">Se désinscrire</button>
         </form>
