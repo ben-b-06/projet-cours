@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-title">
+    <div>
+      <span class="eyebrow">Messagerie</span>
+      <h2>{{ 'Discuter avec un professeur' if current_user['role'] == 'etudiant' else 'Discuter avec un élève' }}</h2>
+    </div>
+  </div>
+
+  <div class="msg-shell">
+    <div class="msg-list card">
+      {% if contacts %}
+        {% for c in contacts %}
+        <a class="msg-contact {{ 'active' if active_contact and active_contact['id'] == c['id'] else '' }}"
+           href="{{ url_for('messagerie_conversation', contact_id=c['id']) }}">
+          <span class="msg-contact-top">
+            <span class="msg-contact-name">{{ c['name'] }}</span>
+            {% if c['unread'] %}<span class="msg-badge">{{ c['unread'] }}</span>{% endif %}
+          </span>
+          <span class="msg-contact-preview">
+            {% if c['last'] %}{{ c['last']['body'][:48] }}{% if c['last']['body']|length > 48 %}…{% endif %}{% else %}Aucun message pour le moment{% endif %}
+          </span>
+        </a>
+        {% endfor %}
+      {% else %}
+        <p class="slot-empty" style="padding:1rem;">
+          {% if current_user['role'] == 'etudiant' %}
+            Réservez un cours avec un professeur pour pouvoir lui écrire.
+          {% else %}
+            Aucun élève ne vous a encore réservé de cours.
+          {% endif %}
+        </p>
+      {% endif %}
+    </div>
+
+    <div class="msg-thread card">
+      {% if active_contact %}
+        <div class="msg-thread-header">{{ active_contact['name'] }}</div>
+        <div class="msg-bubbles">
+          {% if thread %}
+            {% for m in thread %}
+              <div class="msg-bubble {{ 'mine' if m['sender_id'] == current_user['id'] else 'theirs' }}">
+                <p>{{ m['body'] }}</p>
+                <span class="msg-time">{{ m['created_at'] }}</span>
+              </div>
+            {% endfor %}
+          {% else %}
+            <p class="slot-empty">Aucun message échangé pour l'instant — dites bonjour !</p>
+          {% endif %}
+        </div>
+        <form method="post" action="{{ url_for('messagerie_conversation', contact_id=active_contact['id']) }}" class="msg-form">
+          <textarea name="body" rows="2" placeholder="Écrivez votre message…" required></textarea>
+          <button class="btn btn-gold" type="submit">Envoyer</button>
+        </form>
+      {% else %}
+        <div class="empty-state">Sélectionnez un correspondant à gauche pour afficher la conversation.</div>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}
