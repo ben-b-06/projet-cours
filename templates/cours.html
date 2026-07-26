@@ -11,6 +11,43 @@
     Chaque cours est un accompagnement individuel : une fois réservé par un élève, il n'apparaît plus pour les autres.
   </p>
 
+  <form method="get" action="{{ url_for('cours') }}" class="card filter-bar">
+    <div class="field">
+      <label for="q">Recherche</label>
+      <input type="text" id="q" name="q" placeholder="Titre ou description…" value="{{ filters.q }}">
+    </div>
+    <div class="field">
+      <label for="subject">Matière</label>
+      <select id="subject" name="subject">
+        <option value="">Toutes</option>
+        {% for m in matieres %}
+        <option value="{{ m }}" {{ 'selected' if filters.subject == m else '' }}>{{ m }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="level">Niveau</label>
+      <select id="level" name="level">
+        <option value="">Tous</option>
+        {% for n in niveaux %}
+        <option value="{{ n }}" {{ 'selected' if filters.level == n else '' }}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="teacher_id">Professeur</label>
+      <select id="teacher_id" name="teacher_id">
+        <option value="">Tous</option>
+        {% for t in teachers %}
+        <option value="{{ t['id'] }}" {{ 'selected' if filters.teacher_id == t['id']|string else '' }}>{{ t['name'] }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <button class="btn btn-gold" type="submit">Filtrer</button>
+    </div>
+  </form>
+
   {% if courses %}
   <div class="course-grid">
     {% for c in courses %}
@@ -25,9 +62,16 @@
           {% if c['reserved_by'] == current_user['id'] %}
             <span class="badge-enrolled">Réservé par vous</span>
           {% else %}
-            <form method="post" action="{{ url_for('inscription_cours', course_id=c['id']) }}">
-              <button class="btn btn-sage" style="font-size:0.8rem;padding:0.45rem 0.8rem;">Réserver ce cours</button>
-            </form>
+            <details>
+              <summary class="btn btn-sage" style="font-size:0.8rem;padding:0.45rem 0.8rem;display:inline-block;">Réserver ce cours</summary>
+              <form method="post" action="{{ url_for('inscription_cours', course_id=c['id']) }}" style="margin-top:0.7rem;">
+                <div class="field">
+                  <label>Sujets à travailler avec le prof (optionnel)</label>
+                  <textarea name="notes" rows="2" placeholder="Ex. : révision des fractions, méthodologie de la dissertation…"></textarea>
+                </div>
+                <button class="btn btn-sage" style="font-size:0.8rem;padding:0.45rem 0.8rem;">Confirmer la réservation</button>
+              </form>
+            </details>
           {% endif %}
         {% elif not current_user %}
           <a class="btn btn-outline" style="font-size:0.78rem;padding:0.45rem 0.8rem;" href="{{ url_for('connexion') }}">Se connecter</a>
