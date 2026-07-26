@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+  <span class="eyebrow">{{ 'Étudiant' if role_mode == 'etudiant' else 'Professeur' }} / Calendrier</span>
+
+  <div class="row-between" style="margin-bottom:1.4rem;">
+    <h2 style="font-size:1.5rem;margin:0;">{{ month_label }}</h2>
+    <div style="display:flex;gap:0.5rem;">
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ prev_link }}">← Précédent</a>
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ today_link }}">Aujourd'hui</a>
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ next_link }}">Suivant →</a>
+    </div>
+  </div>
+
+  {% if role_mode == 'prof' %}
+  <div class="calendar-legend">
+    <span><i class="legend-dot legend-reserve"></i>Réservé</span>
+    <span><i class="legend-dot legend-dispo"></i>Disponible</span>
+  </div>
+  {% endif %}
+
+  <div class="calendar">
+    <div class="calendar-weekdays">
+      {% for j in jours %}
+        <div class="calendar-weekday">{{ j }}</div>
+      {% endfor %}
+    </div>
+    {% for week in weeks %}
+    <div class="calendar-week">
+      {% for day in week %}
+      <div class="calendar-day {{ '' if day.in_month else 'is-outside' }} {{ 'is-today' if day.is_today else '' }}">
+        <span class="calendar-day-num">{{ day.date.day }}</span>
+        {% for ev in day.events %}
+          <div class="calendar-event event-{{ ev.status }}" title="{{ ev.title }} — {{ ev.subtitle }}">
+            <span class="event-time">{{ ev.time }}</span> {{ ev.title }}
+          </div>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+{% endblock %}

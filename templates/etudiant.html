@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros %}
+{% block content %}
+  <span class="eyebrow">Étudiant / Mes cours</span>
+  <div class="row-between" style="margin-bottom:1.6rem;">
+    <h2 style="font-size:1.5rem;margin:0;">Bonjour, {{ current_user['name'] }}</h2>
+    <a class="btn btn-outline" href="{{ url_for('etudiant_calendrier') }}">Voir le calendrier</a>
+  </div>
+
+  {% if courses %}
+  <div class="course-grid">
+    {% for c in courses %}
+    <div class="card course-card">
+      <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
+      <h3>{{ c['title'] }}</h3>
+      <p class="course-desc">{{ c['description'] }}</p>
+      {{ macros.slot_list(slots_map.get(c['id'], [])) }}
+      <div class="course-meta">
+        <span>Par {{ c['teacher_name'] }}</span>
+        <form method="post" action="{{ url_for('desinscription_cours', course_id=c['id']) }}">
+          <button class="btn-danger-outline">Se désinscrire</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    Vous n'êtes inscrit(e) à aucun cours pour le moment.
+    <div><a class="btn btn-gold" href="{{ url_for('cours') }}">Parcourir les cours</a></div>
+  </div>
+  {% endif %}
+{% endblock %}

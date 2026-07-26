@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros %}
+{% block content %}
+  <div class="section-title">
+    <div>
+      <span class="eyebrow">Accueil / Liste des cours</span>
+      <h2>Cours disponibles</h2>
+    </div>
+  </div>
+  <p style="color:var(--text-muted);font-size:0.9rem;margin:-0.6rem 0 1.4rem;">
+    Chaque cours est un accompagnement individuel : une fois réservé par un élève, il n'apparaît plus pour les autres.
+  </p>
+
+  {% if courses %}
+  <div class="course-grid">
+    {% for c in courses %}
+    <div class="card course-card">
+      <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
+      <h3>{{ c['title'] }}</h3>
+      <p class="course-desc">{{ c['description'] }}</p>
+      {{ macros.slot_list(slots_map.get(c['id'], [])) }}
+      <div class="course-meta">
+        <span>Par {{ c['teacher_name'] }}</span>
+        {% if current_user and current_user['role'] == 'etudiant' %}
+          {% if c['reserved_by'] == current_user['id'] %}
+            <span class="badge-enrolled">Réservé par vous</span>
+          {% else %}
+            <form method="post" action="{{ url_for('inscription_cours', course_id=c['id']) }}">
+              <button class="btn btn-sage" style="font-size:0.8rem;padding:0.45rem 0.8rem;">Réserver ce cours</button>
+            </form>
+          {% endif %}
+        {% elif not current_user %}
+          <a class="btn btn-outline" style="font-size:0.78rem;padding:0.45rem 0.8rem;" href="{{ url_for('connexion') }}">Se connecter</a>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">Aucun cours disponible pour le moment — repassez bientôt !</div>
+  {% endif %}
+{% endblock %}

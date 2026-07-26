@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros %}
+{% block content %}
+  <span class="eyebrow">Professeur / Tableau de bord</span>
+  <div class="row-between" style="margin-bottom:1.6rem;">
+    <h2 style="font-size:1.5rem;margin:0;">Bonjour, {{ current_user['name'] }}</h2>
+    <div style="display:flex;gap:0.6rem;">
+      <a class="btn btn-outline" href="{{ url_for('prof_calendrier') }}">Voir le calendrier</a>
+      <a class="btn btn-gold" href="{{ url_for('prof_creer') }}">+ Créer un cours</a>
+    </div>
+  </div>
+
+  <div class="stats-row">
+    <div class="card stat-card">
+      <div class="stat-num">{{ courses|length }}</div>
+      <div class="stat-label">Cours créés</div>
+    </div>
+    <div class="card stat-card">
+      <div class="stat-num">{{ reserved_count }}</div>
+      <div class="stat-label">Cours réservés</div>
+    </div>
+  </div>
+
+  <div class="section-title"><h2>Mes cours</h2></div>
+
+  {% if courses %}
+  <div class="course-grid">
+    {% for c in courses %}
+    <div class="card course-card">
+      <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
+      <h3>{{ c['title'] }}</h3>
+      <p class="course-desc">{{ c['description'] }}</p>
+      {{ macros.slot_list(slots_map.get(c['id'], [])) }}
+      <div class="course-meta">
+        {% if c['reserved_by'] %}
+          <span class="badge-enrolled">Réservé par {{ c['student_name'] }}</span>
+        {% else %}
+          <span class="mono" style="font-size:0.78rem;color:var(--text-muted);">Disponible</span>
+        {% endif %}
+        <form method="post" action="{{ url_for('prof_supprimer', course_id=c['id']) }}" onsubmit="return confirm('Supprimer ce cours ?');">
+          <button class="btn-danger-outline">Supprimer</button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">
+    Vous n'avez pas encore créé de cours.
+    <div><a class="btn btn-gold" href="{{ url_for('prof_creer') }}">Créer mon premier cours</a></div>
+  </div>
+  {% endif %}
+{% endblock %}

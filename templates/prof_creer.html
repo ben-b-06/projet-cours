@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block content %}
+  <span class="eyebrow">Professeur / Créer un cours</span>
+  <div class="card form-card wide">
+    <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Nouveau cours</h2>
+    <form method="post" id="courseForm">
+      <div class="field">
+        <label>Titre du cours</label>
+        <input type="text" name="title" required placeholder="Ex. Préparer le brevet de mathématiques"
+               value="{{ form.get('title', '') }}">
+      </div>
+
+      <div class="row-fields">
+        <div class="field" style="flex:1;">
+          <label>Matière</label>
+          <select name="subject" required>
+            <option value="" disabled {% if not form.get('subject') %}selected{% endif %}>Choisir une matière</option>
+            {% for m in matieres %}
+              <option value="{{ m }}" {% if form.get('subject') == m %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field" style="flex:1;">
+          <label>Niveau scolaire</label>
+          <select name="level" required>
+            <option value="" disabled {% if not form.get('level') %}selected{% endif %}>Choisir un niveau</option>
+            {% for n in niveaux %}
+              <option value="{{ n }}" {% if form.get('level') == n %}selected{% endif %}>{{ n }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Description</label>
+        <textarea name="description" rows="4" required placeholder="Ce que les étudiants vont apprendre...">{{ form.get('description', '') }}</textarea>
+      </div>
+
+      <div class="field">
+        <label>Créneaux proposés</label>
+        <p class="slot-help">Ajoutez autant de créneaux que vous voulez : chacun a une date, une heure de début et une durée.</p>
+        <div id="slotRows"></div>
+        <button type="button" class="btn btn-outline" id="addSlotBtn" style="margin-top:0.4rem;">+ Ajouter un créneau</button>
+      </div>
+
+      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;margin-top:0.6rem;">Publier le cours</button>
+    </form>
+  </div>
+
+  <template id="slotRowTemplate">
+    <div class="slot-row">
+      <div class="field" style="flex:1.2;margin-bottom:0;">
+        <label>Date</label>
+        <input type="date" name="slot_date[]" required>
+      </div>
+      <div class="field" style="flex:1;margin-bottom:0;">
+        <label>Heure</label>
+        <input type="time" name="slot_time[]" required>
+      </div>
+      <div class="field" style="flex:1;margin-bottom:0;">
+        <label>Durée (min)</label>
+        <input type="number" name="slot_duration[]" min="5" step="5" value="60" required>
+      </div>
+      <button type="button" class="slot-remove" title="Retirer ce créneau">✕</button>
+    </div>
+  </template>
+
+  <script>
+    const slotRows = document.getElementById('slotRows');
+    const template = document.getElementById('slotRowTemplate');
+
+    function addSlotRow(){
+      const clone = template.content.cloneNode(true);
+      clone.querySelector('.slot-remove').addEventListener('click', (e) => {
+        e.target.closest('.slot-row').remove();
+      });
+      slotRows.appendChild(clone);
+    }
+
+    document.getElementById('addSlotBtn').addEventListener('click', addSlotRow);
+
+    // Toujours démarrer avec un premier créneau prêt à remplir
+    addSlotRow();
+  </script>
+{% endblock %}

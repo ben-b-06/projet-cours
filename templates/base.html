@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}CoursConnect{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<button class="mobile-toggle" id="mobileToggle">☰ Menu</button>
+
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><span class="brand-mark">◆</span>CoursConnect</div>
+
+    <ul class="tree">
+      <li>
+        <span class="tree-group">Accueil</span>
+        <ul>
+          <li><a class="tree-link {{ 'active' if request.endpoint=='presentation' else '' }}" href="{{ url_for('presentation') }}"><span class="dot"></span>Présentation</a></li>
+          <li><a class="tree-link {{ 'active' if request.endpoint=='cours' else '' }}" href="{{ url_for('cours') }}"><span class="dot"></span>Liste des cours</a></li>
+        </ul>
+      </li>
+      <li>
+        <span class="tree-group">Authentification</span>
+        <ul>
+          <li><a class="tree-link {{ 'active' if request.endpoint=='connexion' else '' }}" href="{{ url_for('connexion') }}"><span class="dot"></span>Connexion</a></li>
+          <li><a class="tree-link {{ 'active' if request.endpoint=='inscription' else '' }}" href="{{ url_for('inscription') }}"><span class="dot"></span>Inscription</a></li>
+        </ul>
+      </li>
+      <li>
+        <span class="tree-group">Professeur</span>
+        <ul>
+          <li><a class="tree-link {{ 'active' if request.endpoint=='prof_dashboard' else '' }}" href="{{ url_for('prof_dashboard') }}"><span class="dot"></span>Tableau de bord</a></li>
+          <li><a class="tree-link {{ 'active' if request.endpoint=='prof_creer' else '' }}" href="{{ url_for('prof_creer') }}"><span class="dot"></span>Créer un cours</a></li>
+          <li><a class="tree-link {{ 'active' if request.endpoint=='prof_calendrier' else '' }}" href="{{ url_for('prof_calendrier') }}"><span class="dot"></span>Calendrier</a></li>
+        </ul>
+      </li>
+      <li>
+        <span class="tree-group">Étudiant</span>
+        <ul>
+          <li><a class="tree-link {{ 'active' if request.endpoint=='etudiant' else '' }}" href="{{ url_for('etudiant') }}"><span class="dot"></span>Mes cours</a></li>
+          <li><a class="tree-link {{ 'active' if request.endpoint=='etudiant_calendrier' else '' }}" href="{{ url_for('etudiant_calendrier') }}"><span class="dot"></span>Calendrier</a></li>
+        </ul>
+      </li>
+      <li>
+        <span class="tree-group">Administration</span>
+        <ul>
+          <li><a class="tree-link {{ 'active' if request.endpoint=='admin_dashboard' else '' }}" href="{{ url_for('admin_dashboard') }}"><span class="dot"></span>Tableau de bord</a></li>
+        </ul>
+      </li>
+    </ul>
+
+    <div class="session-box">
+      {% if current_user %}
+        <span class="who">{{ current_user['name'] }}</span>
+        <span style="display:block;margin-bottom:0.7rem;">{{ 'Compte professeur' if current_user['role']=='prof' else 'Compte étudiant' }}</span>
+        <a class="btn-ghost-light" href="{{ url_for('deconnexion') }}">Se déconnecter</a>
+      {% else %}
+        <span style="display:block;margin-bottom:0.7rem;">Non connecté(e)</span>
+        <a class="btn-ghost-light" href="{{ url_for('connexion') }}">Se connecter</a>
+      {% endif %}
+    </div>
+  </aside>
+
+  <main class="content">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flash-stack">
+        {% for category, msg in messages %}
+          <div class="flash flash-{{ category }}">{{ msg }}</div>
+        {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+</div>
+
+<script>
+  document.getElementById('mobileToggle').onclick = () => {
+    document.getElementById('sidebar').classList.toggle('open');
+  };
+  document.querySelectorAll('.flash').forEach(el => {
+    setTimeout(() => el.classList.add('fade'), 3200);
+  });
+</script>
+</body>
+</html>

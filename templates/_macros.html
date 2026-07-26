@@ -1,0 +1,11 @@
+{% macro slot_list(slots) %}
+  {% if slots %}
+    <ul class="slot-list">
+      {% for s in slots %}
+        <li><span class="slot-date">{{ s['slot_date'] }}</span> · {{ s['slot_time'] }} · {{ s['duration_minutes']|duree_lisible }}</li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="slot-empty">Aucun créneau programmé.</p>
+  {% endif %}
+{% endmacro %}

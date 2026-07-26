@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+  <span class="eyebrow">Authentification / Inscription</span>
+  <div class="card form-card">
+    <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Créer un compte</h2>
+    <form method="post">
+      <div class="field">
+        <label>Nom complet</label>
+        <input type="text" name="name" required placeholder="Prénom Nom">
+      </div>
+      <div class="field">
+        <label>Adresse e-mail</label>
+        <input type="email" name="email" required placeholder="vous@exemple.fr">
+      </div>
+      <div class="field">
+        <label>Mot de passe</label>
+        <input type="password" name="password" required minlength="4" placeholder="Au moins 4 caractères">
+      </div>
+      <div class="field">
+        <label>Je m'inscris en tant que</label>
+        <div class="radio-row">
+          <label class="radio-card checked" onclick="syncRadio(this)">
+            <input type="radio" name="role" value="prof" checked>Professeur
+          </label>
+          <label class="radio-card" onclick="syncRadio(this)">
+            <input type="radio" name="role" value="etudiant">Étudiant
+          </label>
+        </div>
+      </div>
+      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;">Créer mon compte</button>
+    </form>
+    <a class="helper-link" href="{{ url_for('connexion') }}">Déjà un compte ? Se connecter</a>
+  </div>
+
+  <script>
+    function syncRadio(label){
+      document.querySelectorAll('.radio-card').forEach(c => c.classList.remove('checked'));
+      label.classList.add('checked');
+    }
+  </script>
+{% endblock %}
