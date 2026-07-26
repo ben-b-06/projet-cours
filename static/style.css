@@ -397,6 +397,90 @@ label{font-size:0.83rem;font-weight:600;color:var(--text-muted);display:block;ma
   .hero h1{font-size:1.9rem;}
 }
 
+/* ---------- filtres liste des cours ---------- */
+.filter-bar{
+  display:grid;
+  grid-template-columns:2fr 1fr 1fr 1fr auto;
+  gap:0.7rem;
+  align-items:end;
+  padding:1.1rem;
+  margin-bottom:1.4rem;
+}
+.filter-bar .field{margin-bottom:0;}
+.filter-bar label{margin-bottom:0.3rem;}
+.filter-bar input, .filter-bar select{padding:0.6rem 0.7rem;font-size:0.88rem;}
+.filter-bar .btn{white-space:nowrap;}
+@media (max-width: 860px){
+  .filter-bar{grid-template-columns:1fr 1fr;}
+}
+
+/* ---------- messagerie ---------- */
+.msg-shell{
+  display:grid;
+  grid-template-columns:280px 1fr;
+  gap:1.1rem;
+  align-items:start;
+}
+.msg-list{display:flex;flex-direction:column;overflow:hidden;}
+.msg-contact{
+  display:flex;
+  flex-direction:column;
+  gap:0.2rem;
+  padding:0.85rem 1rem;
+  border-bottom:1px solid var(--border);
+  transition:background .15s ease;
+}
+.msg-contact:hover{background:rgba(108,111,168,0.06);}
+.msg-contact.active{background:rgba(217,164,65,0.12);border-left:3px solid var(--gold);}
+.msg-contact-top{display:flex;justify-content:space-between;align-items:center;}
+.msg-contact-name{font-weight:600;font-size:0.92rem;}
+.msg-contact-preview{font-size:0.78rem;color:var(--text-muted);}
+.msg-badge{
+  background:var(--gold);
+  color:var(--ink);
+  font-size:0.7rem;
+  font-weight:700;
+  padding:0.1rem 0.45rem;
+  border-radius:20px;
+}
+.msg-thread{
+  min-height:460px;
+  display:flex;
+  flex-direction:column;
+  padding:1.2rem;
+}
+.msg-thread-header{
+  font-family:'Fraunces',serif;
+  font-size:1.1rem;
+  padding-bottom:0.8rem;
+  margin-bottom:0.8rem;
+  border-bottom:1px solid var(--border);
+}
+.msg-bubbles{
+  flex:1;
+  display:flex;
+  flex-direction:column;
+  gap:0.6rem;
+  overflow-y:auto;
+  margin-bottom:1rem;
+}
+.msg-bubble{
+  max-width:70%;
+  padding:0.6rem 0.85rem;
+  border-radius:12px;
+  font-size:0.9rem;
+}
+.msg-bubble p{margin:0 0 0.25rem;}
+.msg-bubble .msg-time{font-size:0.68rem;color:var(--text-muted);}
+.msg-bubble.theirs{align-self:flex-start;background:var(--paper);border:1px solid var(--border);}
+.msg-bubble.mine{align-self:flex-end;background:var(--indigo-accent);color:#fff;}
+.msg-bubble.mine .msg-time{color:rgba(255,255,255,0.75);}
+.msg-form{display:flex;gap:0.6rem;align-items:flex-end;}
+.msg-form textarea{resize:vertical;}
+@media (max-width: 860px){
+  .msg-shell{grid-template-columns:1fr;}
+}
+
 @media (prefers-reduced-motion: reduce){
   *{transition:none !important;}
 }
