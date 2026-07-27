@@ -63,6 +63,7 @@
 <span class="tree-group">Administration</span>
 <ul>
 <li><a class="tree-link {{ 'active' if request.endpoint=='admin_dashboard' else '' }}" href="{{ url_for('admin_dashboard') }}"><span class="dot"></span>Tableau de bord</a></li>
+<li><a class="tree-link {{ 'active' if request.endpoint in ['admin_messagerie','admin_messagerie_thread'] else '' }}" href="{{ url_for('admin_messagerie') }}"><span class="dot"></span>Messagerie</a></li>
 </ul>
 </li>
 {% endif %}
