@@ -44,16 +44,24 @@
       <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
       <h3>{{ c['title'] }}</h3>
       <p class="course-desc">{{ c['description'] }}</p>
+      <p style="font-size:0.8rem;color:var(--text-muted);margin:-0.4rem 0 0.6rem;">
+        {% if c['mode'] == 'en_ligne' %}🎥 En ligne
+        {% elif c['mode'] == 'presentiel' %}📍 En présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
+        {% else %}🎥📍 En ligne ou en présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
+        {% endif %}
+      </p>
       {{ macros.slot_list(course_slots) }}
 
       {% for s in course_slots if s['reserved_by'] %}
         <div class="slot-contact-row">
-          <span class="badge-enrolled">{{ s['slot_date'] }} {{ s['slot_time'] }} · {{ s['student_name'] }}</span>
+          <span class="badge-enrolled">{{ s['slot_date'] }} {{ s['slot_time'] }} · {{ s['student_name'] }} · {{ '🎥 En ligne' if s['slot_mode'] == 'en_ligne' else '📍 Présentiel' }}</span>
           {% if s['student_notes'] %}
             <span class="mono" style="font-size:0.76rem;color:var(--text-muted);">{{ s['student_notes'] }}</span>
           {% endif %}
           <a class="btn btn-outline" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('messagerie_conversation', contact_id=s['reserved_by']) }}">Écrire à l'élève</a>
-          <a class="btn btn-sage" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('visio', course_id=c['id'], slot_id=s['id']) }}">🎥 Visio</a>
+          {% if s['slot_mode'] == 'en_ligne' %}
+            <a class="btn btn-sage" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('visio', course_id=c['id'], slot_id=s['id']) }}">🎥 Visio</a>
+          {% endif %}
         </div>
       {% endfor %}
 

@@ -28,10 +28,83 @@
     <button class="btn btn-outline" id="camBtn" style="display:none;">Couper la caméra</button>
   </div>
 
+  <div class="card visio-chat">
+    <div class="visio-chat-header">Discuter avec {{ partner['name'] }}</div>
+    <div class="visio-chat-bubbles" id="chatBubbles">
+      {% for m in chat_messages %}
+        <div class="msg-bubble {{ 'mine' if m['sender_id'] == current_user['id'] else 'theirs' }}">
+          <p>{{ m['body'] }}</p>
+          <span class="msg-time">{{ m['created_at'] }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    <form class="visio-chat-form" id="chatForm">
+      <textarea id="chatInput" rows="1" placeholder="Écrivez un message pendant l'appel…" required></textarea>
+      <button class="btn btn-gold" type="submit">Envoyer</button>
+    </form>
+  </div>
+
   <script>
     const courseId = {{ course['id'] }};
     const sendUrl = "{{ url_for('visio_envoyer', course_id=course['id'], slot_id=slot['id']) }}";
     const pollUrl = "{{ url_for('visio_recevoir', course_id=course['id'], slot_id=slot['id']) }}";
+    const chatSendUrl = "{{ url_for('visio_chat_envoyer', course_id=course['id'], slot_id=slot['id']) }}";
+    const chatPollUrl = "{{ url_for('visio_chat_recevoir', course_id=course['id'], slot_id=slot['id']) }}";
+    const myUserId = {{ current_user['id'] }};
+
+    const chatBubbles = document.getElementById('chatBubbles');
+    const chatForm = document.getElementById('chatForm');
+    const chatInput = document.getElementById('chatInput');
+    let lastChatId = {{ (chat_messages[-1]['id'] if chat_messages else 0) }};
+
+    function addChatBubble(body, time, mine) {
+      const div = document.createElement('div');
+      div.className = 'msg-bubble ' + (mine ? 'mine' : 'theirs');
+      const p = document.createElement('p');
+      p.textContent = body;
+      const span = document.createElement('span');
+      span.className = 'msg-time';
+      span.textContent = time;
+      div.appendChild(p);
+      div.appendChild(span);
+      chatBubbles.appendChild(div);
+      chatBubbles.scrollTop = chatBubbles.scrollHeight;
+    }
+
+    chatBubbles.scrollTop = chatBubbles.scrollHeight;
+
+    chatForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = chatInput.value.trim();
+      if (!body) return;
+      chatInput.value = '';
+      try {
+        const res = await fetch(chatSendUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ body }),
+        });
+        const data = await res.json();
+        if (data && data.message) {
+          lastChatId = Math.max(lastChatId, data.message.id);
+          addChatBubble(data.message.body, data.message.created_at, true);
+        }
+      } catch (e) { /* on réessaiera au prochain envoi */ }
+    });
+
+    async function pollChat() {
+      try {
+        const res = await fetch(`${chatPollUrl}?since=${lastChatId}`, { credentials: 'same-origin' });
+        const data = await res.json();
+        for (const m of (data.messages || [])) {
+          lastChatId = Math.max(lastChatId, m.id);
+          addChatBubble(m.body, m.created_at, m.sender_id === myUserId);
+        }
+      } catch (e) { /* silencieux : on réessaiera au prochain tick */ }
+    }
+
+    setInterval(pollChat, 2000);
 
     const statusEl = document.getElementById('visioStatus');
     const localVideo = document.getElementById('localVideo');

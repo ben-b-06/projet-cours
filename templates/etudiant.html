@@ -14,7 +14,14 @@
       <h3>{{ r['title'] }}</h3>
       <p class="course-desc">{{ r['description'] }}</p>
       <ul class="slot-list">
-        <li><span class="slot-date">{{ r['slot_date'] }}</span> · {{ r['slot_time'] }} · {{ r['duration_minutes']|duree_lisible }}</li>
+        <li>
+          <span class="slot-date">{{ r['slot_date'] }}</span> · {{ r['slot_time'] }} · {{ r['duration_minutes']|duree_lisible }}
+          {% if r['slot_mode'] == 'en_ligne' %}
+            <span class="slot-status">🎥 En ligne</span>
+          {% else %}
+            <span class="slot-status">📍 Présentiel{{ ' · ' + r['course_city'] if r['course_city'] else '' }}</span>
+          {% endif %}
+        </li>
       </ul>
       {% if r['student_notes'] %}
         <p style="font-size:0.82rem;color:var(--text-muted);background:var(--paper);padding:0.5rem 0.7rem;border-radius:8px;margin:0;">
@@ -24,7 +31,9 @@
       <div class="course-meta">
         <span>Par {{ r['teacher_name'] }}</span>
         <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('messagerie_conversation', contact_id=r['teacher_id']) }}">Écrire au prof</a>
-        <a class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('visio', course_id=r['course_id'], slot_id=r['id']) }}">🎥 Visioconférence</a>
+        {% if r['slot_mode'] == 'en_ligne' %}
+          <a class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('visio', course_id=r['course_id'], slot_id=r['id']) }}">🎥 Visioconférence</a>
+        {% endif %}
         <form method="post" action="{{ url_for('desinscription_cours', course_id=r['course_id'], slot_id=r['id']) }}">
           <button class="btn-danger-outline">Annuler ce créneau</button>
         </form>

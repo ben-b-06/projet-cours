@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+  <span class="eyebrow">Paramètres</span>
+  <div class="card form-card">
+    <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Changer mon mot de passe</h2>
+    <p class="mono" style="font-size:0.8rem;color:var(--text-muted);margin:0 0 1.3rem;">{{ user['email'] }}</p>
+
+    <form method="post">
+      <div class="field">
+        <label>Mot de passe actuel</label>
+        <input type="password" name="current_password" required placeholder="••••••••">
+      </div>
+      <div class="field">
+        <label>Nouveau mot de passe</label>
+        <input type="password" name="new_password" required placeholder="••••••••">
+        <p class="password-hint">4 caractères minimum.</p>
+      </div>
+      <div class="field">
+        <label>Confirmer le nouveau mot de passe</label>
+        <input type="password" name="confirm_password" required placeholder="••••••••">
+      </div>
+      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;">Mettre à jour le mot de passe</button>
+    </form>
+
+    <p class="password-hint" style="margin-top:1.3rem;">
+      Mot de passe oublié et impossible de vous connecter ? Contactez l'administrateur de la plateforme,
+      qui peut réinitialiser votre mot de passe depuis son tableau de bord.
+    </p>
+  </div>
+{% endblock %}

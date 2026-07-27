@@ -19,10 +19,16 @@
       <p class="course-desc mono" style="font-size:0.82rem;">{{ p['email'] }}</p>
       <div class="course-meta">
         <span>{{ p['course_count'] }} cours créé(s)</span>
-        <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=p['id']) }}"
-              onsubmit="return confirm('Supprimer ce professeur ? Tous ses cours seront aussi supprimés.');">
-          <button class="btn-danger-outline">Supprimer</button>
-        </form>
+        <div style="display:flex;gap:0.5rem;">
+          <form method="post" action="{{ url_for('admin_reinitialiser_mot_de_passe', user_id=p['id']) }}"
+                onsubmit="return confirm('Générer un nouveau mot de passe temporaire pour ce professeur ?');">
+            <button class="btn btn-outline">Réinitialiser le mot de passe</button>
+          </form>
+          <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=p['id']) }}"
+                onsubmit="return confirm('Supprimer ce professeur ? Tous ses cours seront aussi supprimés.');">
+            <button class="btn-danger-outline">Supprimer</button>
+          </form>
+        </div>
       </div>
     </div>
     {% endfor %}
@@ -40,10 +46,16 @@
       <p class="course-desc mono" style="font-size:0.82rem;">{{ s['email'] }}</p>
       <div class="course-meta">
         <span>{{ s['course_count'] }} créneau(x) réservé(s)</span>
-        <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=s['id']) }}"
-              onsubmit="return confirm('Supprimer cet étudiant ?');">
-          <button class="btn-danger-outline">Supprimer</button>
-        </form>
+        <div style="display:flex;gap:0.5rem;">
+          <form method="post" action="{{ url_for('admin_reinitialiser_mot_de_passe', user_id=s['id']) }}"
+                onsubmit="return confirm('Générer un nouveau mot de passe temporaire pour cet élève ?');">
+            <button class="btn btn-outline">Réinitialiser le mot de passe</button>
+          </form>
+          <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=s['id']) }}"
+                onsubmit="return confirm('Supprimer cet étudiant ?');">
+            <button class="btn-danger-outline">Supprimer</button>
+          </form>
+        </div>
       </div>
     </div>
     {% endfor %}

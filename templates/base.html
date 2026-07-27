@@ -69,6 +69,15 @@
 </li>
 {% endif %}
 
+{% if current_user %}
+<li>
+<span class="tree-group">Paramètres</span>
+<ul>
+<li><a class="tree-link {{ 'active' if request.endpoint=='parametres' else '' }}" href="{{ url_for('parametres') }}"><span class="dot"></span>Changer mon mot de passe</a></li>
+</ul>
+</li>
+{% endif %}
+
 </ul>
 
 <div class="session-box">

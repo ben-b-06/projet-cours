@@ -35,6 +35,18 @@
       </select>
     </div>
     <div class="field">
+      <label for="mode">Modalité</label>
+      <select id="mode" name="mode" onchange="document.getElementById('cityFilterField').style.display = (this.value === 'presentiel') ? '' : 'none';">
+        <option value="">Toutes</option>
+        <option value="en_ligne" {{ 'selected' if filters.mode == 'en_ligne' else '' }}>En ligne</option>
+        <option value="presentiel" {{ 'selected' if filters.mode == 'presentiel' else '' }}>En présentiel</option>
+      </select>
+    </div>
+    <div class="field" id="cityFilterField" style="{{ '' if filters.mode == 'presentiel' else 'display:none;' }}">
+      <label for="city">Ville</label>
+      <input type="text" id="city" name="city" placeholder="Ex. Lyon" value="{{ filters.city }}">
+    </div>
+    <div class="field">
       <label for="teacher_id">Professeur</label>
       <select id="teacher_id" name="teacher_id">
         <option value="">Tous</option>
@@ -66,6 +78,12 @@
       <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
       <h3>{{ c['title'] }}</h3>
       <p class="course-desc">{{ c['description'] }}</p>
+      <p style="font-size:0.8rem;color:var(--text-muted);margin:-0.4rem 0 0.6rem;">
+        {% if c['mode'] == 'en_ligne' %}🎥 En ligne
+        {% elif c['mode'] == 'presentiel' %}📍 En présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
+        {% else %}🎥📍 En ligne ou en présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
+        {% endif %}
+      </p>
 
       {% set tr = ratings_map.get(c['teacher_id']) %}
       <div class="teacher-line">
@@ -97,6 +115,11 @@
                     <span class="slot-status slot-status-reserved">Réservé par vous</span>
                   {% elif s['reserved_by'] %}
                     <span class="slot-status slot-status-reserved">Complet</span>
+                  {% elif c['mode'] == 'les_deux' %}
+                    <select name="slot_mode_{{ s['id'] }}" style="margin-left:0.5rem;font-size:0.78rem;">
+                      <option value="en_ligne">🎥 En ligne</option>
+                      <option value="presentiel">📍 En présentiel{{ ' (' + c['city'] + ')' if c['city'] else '' }}</option>
+                    </select>
                   {% endif %}
                 </label>
               </li>

@@ -37,6 +37,24 @@
       </div>
 
       <div class="field">
+        <label>Modalité du cours</label>
+        <div class="row-fields" id="modeChoice">
+          {% for m in modes %}
+            <label class="slot-pick" style="flex:1;cursor:pointer;">
+              <input type="radio" name="mode" value="{{ m }}" required
+                     {% if form.get('mode') == m or (not form.get('mode') and m == 'en_ligne') %}checked{% endif %}>
+              {{ mode_labels[m] }}
+            </label>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="field" id="cityField" style="display:none;">
+        <label>Ville (cours en présentiel)</label>
+        <input type="text" name="city" placeholder="Ex. Lyon" value="{{ form.get('city', '') }}">
+      </div>
+
+      <div class="field">
         <label>Créneaux proposés</label>
         <p class="slot-help">Ajoutez autant de créneaux que vous voulez : chacun a une date, une heure de début et une durée.</p>
         <div id="slotRows"></div>
@@ -66,6 +84,20 @@
   </template>
 
   <script>
+    const cityField = document.getElementById('cityField');
+    const cityInput = cityField.querySelector('input[name="city"]');
+
+    function updateCityVisibility(){
+      const checked = document.querySelector('input[name="mode"]:checked');
+      const needsCity = checked && (checked.value === 'presentiel' || checked.value === 'les_deux');
+      cityField.style.display = needsCity ? '' : 'none';
+      cityInput.required = !!needsCity;
+    }
+    document.querySelectorAll('input[name="mode"]').forEach((radio) => {
+      radio.addEventListener('change', updateCityVisibility);
+    });
+    updateCityVisibility();
+
     const slotRows = document.getElementById('slotRows');
     const template = document.getElementById('slotRowTemplate');
 
