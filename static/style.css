@@ -300,6 +300,74 @@ label{font-size:0.83rem;font-weight:600;color:var(--text-muted);display:block;ma
 .slot-list .slot-date{font-weight:600;}
 .slot-empty{font-size:0.78rem;color:var(--text-muted);font-style:italic;margin:0;}
 
+.slot-status{
+  font-family:'Inter',sans-serif;
+  font-weight:600;
+  font-size:0.7rem;
+  text-transform:uppercase;
+  letter-spacing:0.03em;
+  margin-left:0.4rem;
+  padding:0.12rem 0.45rem;
+  border-radius:10px;
+}
+.slot-status-dispo{background:rgba(95,141,107,0.16);color:var(--sage-dark);}
+.slot-status-reserved{background:rgba(217,164,65,0.2);color:var(--gold-dark);}
+
+/* ---------- créneaux réservables (élève) ---------- */
+.slot-list-picker{gap:0.4rem;}
+.slot-list-picker li{list-style:none;}
+.slot-pick{
+  display:flex;
+  align-items:center;
+  gap:0.5rem;
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.78rem;
+  color:var(--text-dark);
+  background:rgba(217,164,65,0.1);
+  border:1.5px solid transparent;
+  border-radius:6px;
+  padding:0.4rem 0.6rem;
+  cursor:pointer;
+  transition:border-color .15s ease, background .15s ease;
+}
+.slot-pick:has(input:checked){border-color:var(--sage);background:rgba(95,141,107,0.14);}
+.slot-pick input{width:auto;margin:0;}
+.slot-pick.is-taken{background:rgba(29,27,49,0.05);color:var(--text-muted);cursor:default;}
+.slot-pick.is-mine{background:rgba(95,141,107,0.14);color:var(--sage-dark);cursor:default;}
+
+.slot-contact-row{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:0.5rem;
+  padding:0.5rem 0.6rem;
+  background:var(--paper);
+  border-radius:8px;
+}
+
+/* ---------- avatars / profil professeur ---------- */
+.avatar-img{
+  border-radius:50%;
+  object-fit:cover;
+  flex-shrink:0;
+  border:1px solid var(--border);
+}
+.avatar-fallback{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:50%;
+  background:var(--indigo-accent);
+  color:#fff;
+  font-family:'Fraunces',serif;
+  font-weight:600;
+  flex-shrink:0;
+}
+.teacher-line{display:flex;align-items:flex-start;gap:0.6rem;padding:0.4rem 0;}
+.teacher-name{font-weight:600;font-size:0.86rem;}
+.teacher-bio{font-size:0.8rem;color:var(--text-muted);margin:0.2rem 0 0;}
+.profile-current{display:flex;align-items:center;gap:0.9rem;margin-bottom:1.6rem;padding-bottom:1.4rem;border-bottom:1px dashed var(--border);}
+
 /* ---------- visioconférence ---------- */
 .visio-status{
   font-size:0.85rem;
