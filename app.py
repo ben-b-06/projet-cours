@@ -20,9 +20,12 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "coursconnect.db")
+PROFILE_PHOTOS_DIR = os.path.join(BASE_DIR, "static", "uploads", "profils")
+ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 
 app = Flask(__name__)
 app.secret_key = "dev-secret-key-change-me"  # à remplacer par une vraie valeur secrète en production
+app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo max pour les photos de profil
 
 # Choix fermés pour la matière et le niveau scolaire (du collège au lycée)
 MATIERES = ["Mathématiques", "Physique-Chimie", "Français", "SVT", "SES", "Histoire-Géographie"]
@@ -62,7 +65,9 @@ def init_db():
             name TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('admin', 'prof', 'etudiant'))
+            role TEXT NOT NULL CHECK(role IN ('admin', 'prof', 'etudiant')),
+            bio TEXT,
+            photo TEXT
         );
 
         CREATE TABLE IF NOT EXISTS courses(
@@ -71,16 +76,19 @@ def init_db():
             subject TEXT NOT NULL,
             level TEXT NOT NULL,
             description TEXT NOT NULL,
-            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL
+            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
         );
 
+        -- Chaque créneau se réserve individuellement : un cours peut donc être
+        -- suivi par plusieurs élèves différents, chacun sur son propre créneau.
         CREATE TABLE IF NOT EXISTS slots(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
             slot_date TEXT NOT NULL,
             slot_time TEXT NOT NULL,
-            duration_minutes INTEGER NOT NULL
+            duration_minutes INTEGER NOT NULL,
+            reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            student_notes TEXT
         );
 
         -- Historique des mises en relation élève/prof : rempli dès qu'une
@@ -118,11 +126,38 @@ def init_db():
         """
     )
 
-    # Migration : ajoute la colonne des sujets à travailler si elle n'existe pas déjà
-    # (les bases créées avant cette fonctionnalité n'ont pas encore cette colonne).
-    existing_columns = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
-    if "student_notes" not in existing_columns:
-        db.execute("ALTER TABLE courses ADD COLUMN student_notes TEXT")
+    # Migrations : ajoute les colonnes introduites après la création initiale des
+    # tables, pour les bases existantes qui ne les ont pas encore.
+    user_columns = [row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()]
+    if "bio" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN bio TEXT")
+    if "photo" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN photo TEXT")
+
+    slot_columns = [row[1] for row in db.execute("PRAGMA table_info(slots)").fetchall()]
+    if "reserved_by" not in slot_columns:
+        db.execute("ALTER TABLE slots ADD COLUMN reserved_by INTEGER REFERENCES users(id)")
+    if "student_notes" not in slot_columns:
+        db.execute("ALTER TABLE slots ADD COLUMN student_notes TEXT")
+
+    # Anciennes bases : la réservation se faisait au niveau du cours entier.
+    # On la reporte sur chacun de ses créneaux, puis on abandonne les colonnes
+    # devenues inutiles sur la table courses.
+    course_columns = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
+    if "reserved_by" in course_columns:
+        old_courses = db.execute(
+            "SELECT id, reserved_by, student_notes FROM courses WHERE reserved_by IS NOT NULL"
+        ).fetchall()
+        for c in old_courses:
+            db.execute(
+                "UPDATE slots SET reserved_by = ?, student_notes = ? WHERE course_id = ? AND reserved_by IS NULL",
+                (c[1], c[2], c[0]),
+            )
+        db.execute("ALTER TABLE courses DROP COLUMN reserved_by")
+    if "student_notes" in course_columns:
+        db.execute("ALTER TABLE courses DROP COLUMN student_notes")
+
+    os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
 
     # Le compte admin est toujours garanti d'exister, avec des identifiants fixes.
     admin_row = db.execute("SELECT id FROM users WHERE email = ?", (ADMIN_EMAIL,)).fetchone()
@@ -142,15 +177,29 @@ def init_db():
 
 def seed(db):
     demo_users = [
-        ("Camille Dubois", "camille@coursconnect.fr", "prof123", "prof"),
-        ("Karim Haddad", "karim@coursconnect.fr", "prof123", "prof"),
-        ("Léa Marchand", "lea@coursconnect.fr", "etu123", "etudiant"),
+        (
+            "Camille Dubois",
+            "camille@coursconnect.fr",
+            "prof123",
+            "prof",
+            "Professeure de mathématiques et de physique-chimie depuis 8 ans, "
+            "spécialisée dans la préparation du brevet et les révisions ciblées.",
+        ),
+        (
+            "Karim Haddad",
+            "karim@coursconnect.fr",
+            "prof123",
+            "prof",
+            "Enseignant de français et de SES, j'aide les lycéens à structurer "
+            "leur méthodologie pour la dissertation et les épreuves finales.",
+        ),
+        ("Léa Marchand", "lea@coursconnect.fr", "etu123", "etudiant", None),
     ]
     ids = {}
-    for name, email, password, role in demo_users:
+    for name, email, password, role, bio in demo_users:
         cur = db.execute(
-            "INSERT INTO users(name, email, password_hash, role) VALUES (?, ?, ?, ?)",
-            (name, email, generate_password_hash(password), role),
+            "INSERT INTO users(name, email, password_hash, role, bio) VALUES (?, ?, ?, ?, ?)",
+            (name, email, generate_password_hash(password), role, bio),
         )
         ids[email] = cur.lastrowid
 
@@ -194,20 +243,24 @@ def seed(db):
             (title, subject, level, description, teacher_id),
         )
         course_id = cur.lastrowid
-        for slot_date, slot_time, duration in slots:
-            db.execute(
+        reserve_first_slot = title.startswith("Préparer le brevet") or title.startswith("Révisions SES")
+        for i, (slot_date, slot_time, duration) in enumerate(slots):
+            slot_cur = db.execute(
                 "INSERT INTO slots(course_id, slot_date, slot_time, duration_minutes) VALUES (?, ?, ?, ?)",
                 (course_id, slot_date, slot_time, duration),
             )
-        if title.startswith("Préparer le brevet") or title.startswith("Révisions SES"):
-            db.execute(
-                "UPDATE courses SET reserved_by = ? WHERE id = ?",
-                (ids["lea@coursconnect.fr"], course_id),
-            )
-            db.execute(
-                "INSERT OR IGNORE INTO contacts(student_id, teacher_id, course_id) VALUES (?, ?, ?)",
-                (ids["lea@coursconnect.fr"], teacher_id, course_id),
-            )
+            # Seul le tout premier créneau de ces cours est déjà réservé, pour
+            # illustrer qu'un même cours peut avoir des créneaux libres et
+            # d'autres pris par un élève.
+            if reserve_first_slot and i == 0:
+                db.execute(
+                    "UPDATE slots SET reserved_by = ? WHERE id = ?",
+                    (ids["lea@coursconnect.fr"], slot_cur.lastrowid),
+                )
+                db.execute(
+                    "INSERT OR IGNORE INTO contacts(student_id, teacher_id, course_id) VALUES (?, ?, ?)",
+                    (ids["lea@coursconnect.fr"], teacher_id, course_id),
+                )
 
     # Un petit échange de démonstration pour illustrer la messagerie.
     db.execute(
@@ -226,12 +279,20 @@ def seed(db):
 # Authentification
 # ---------------------------------------------------------------------------
 def get_slots_map(db, course_ids):
-    """Retourne {course_id: [slot, ...]} triés par date/heure pour une liste d'ids de cours."""
+    """Retourne {course_id: [slot, ...]} triés par date/heure pour une liste d'ids de
+    cours. Chaque créneau porte son propre statut de réservation (reserved_by,
+    student_name, student_notes), puisque la réservation se fait créneau par créneau."""
     if not course_ids:
         return {}
     placeholders = ",".join("?" for _ in course_ids)
     rows = db.execute(
-        f"SELECT * FROM slots WHERE course_id IN ({placeholders}) ORDER BY slot_date, slot_time",
+        f"""
+        SELECT sl.*, u.name AS student_name
+        FROM slots sl
+        LEFT JOIN users u ON u.id = sl.reserved_by
+        WHERE sl.course_id IN ({placeholders})
+        ORDER BY sl.slot_date, sl.slot_time
+        """,
         list(course_ids),
     ).fetchall()
     slots_map = {cid: [] for cid in course_ids}
@@ -346,14 +407,10 @@ def cours():
     level = request.args.get("level", "").strip()
     teacher_id = request.args.get("teacher_id", "").strip()
 
-    conditions = []
+    # On ne liste que les cours ayant au moins un créneau encore libre : la
+    # réservation se fait désormais créneau par créneau, pas cours entier.
+    conditions = ["EXISTS (SELECT 1 FROM slots s WHERE s.course_id = c.id AND s.reserved_by IS NULL)"]
     params = []
-
-    if user and user["role"] == "etudiant":
-        conditions.append("(c.reserved_by IS NULL OR c.reserved_by = ?)")
-        params.append(user["id"])
-    else:
-        conditions.append("c.reserved_by IS NULL")
 
     if q:
         conditions.append("(c.title LIKE ? OR c.description LIKE ?)")
@@ -375,7 +432,7 @@ def cours():
     where_clause = " AND ".join(conditions) if conditions else "1=1"
     rows = db.execute(
         f"""
-        SELECT c.*, u.name AS teacher_name
+        SELECT c.*, u.name AS teacher_name, u.bio AS teacher_bio, u.photo AS teacher_photo
         FROM courses c
         JOIN users u ON u.id = c.teacher_id
         WHERE {where_clause}
@@ -405,38 +462,66 @@ def cours():
 def inscription_cours(course_id):
     db = get_db()
     course = db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone()
-    notes = request.form.get("notes", "").strip()
     if not course:
         flash("Cours introuvable.", "error")
-    elif course["reserved_by"] is not None:
-        flash("Ce cours vient d'être réservé par un autre élève.", "error")
-    else:
-        db.execute(
-            "UPDATE courses SET reserved_by = ?, student_notes = ? WHERE id = ? AND reserved_by IS NULL",
-            (current_user()["id"], notes or None, course_id),
+        return redirect(url_for("cours"))
+
+    slot_ids = [int(sid) for sid in request.form.getlist("slot_id[]") if sid.isdigit()]
+    notes = request.form.get("notes", "").strip() or None
+
+    if not slot_ids:
+        flash("Sélectionnez au moins un créneau à réserver.", "error")
+        return redirect(url_for("cours"))
+
+    reserved = 0
+    for slot_id in slot_ids:
+        cur = db.execute(
+            """
+            UPDATE slots SET reserved_by = ?, student_notes = ?
+            WHERE id = ? AND course_id = ? AND reserved_by IS NULL
+            """,
+            (current_user()["id"], notes, slot_id, course_id),
         )
+        reserved += cur.rowcount
+
+    if reserved:
         # On garde une trace durable de la mise en relation élève/prof pour la
-        # messagerie, même si l'élève se désinscrit plus tard.
+        # messagerie, même si l'élève annule ses créneaux plus tard.
         db.execute(
             "INSERT OR IGNORE INTO contacts(student_id, teacher_id, course_id) VALUES (?, ?, ?)",
             (current_user()["id"], course["teacher_id"], course_id),
         )
         db.commit()
-        flash("Cours réservé ! Retrouvez-le dans « Mes cours ».", "success")
+        if reserved == len(slot_ids):
+            flash(
+                f"{reserved} créneau(x) réservé(s) ! Retrouvez-les dans « Mes cours ».",
+                "success",
+            )
+        else:
+            flash(
+                f"{reserved} créneau(x) réservé(s) — certains créneaux choisis venaient "
+                "d'être pris par un autre élève.",
+                "error",
+            )
+    else:
+        flash("Les créneaux choisis venaient d'être réservés par un autre élève.", "error")
     return redirect(url_for("cours"))
 
 
-@app.route("/cours/<int:course_id>/desinscription", methods=["POST"])
+@app.route("/cours/<int:course_id>/slots/<int:slot_id>/desinscription", methods=["POST"])
 @login_required(role="etudiant")
-def desinscription_cours(course_id):
+def desinscription_cours(course_id, slot_id):
     db = get_db()
     db.execute(
-        "UPDATE courses SET reserved_by = NULL WHERE id = ? AND reserved_by = ?",
-        (course_id, current_user()["id"]),
+        """
+        UPDATE slots SET reserved_by = NULL, student_notes = NULL
+        WHERE id = ? AND course_id = ? AND reserved_by = ?
+        """,
+        (slot_id, course_id, current_user()["id"]),
     )
     db.commit()
-    flash("Vous avez annulé ce cours.", "success")
-    return redirect(request.referrer or url_for("cours"))
+    flash("Vous avez annulé ce créneau.", "success")
+    return redirect(request.referrer or url_for("etudiant"))
 
 
 # ---------------------------------------------------------------------------
@@ -521,20 +606,50 @@ def prof_dashboard():
     db = get_db()
     user = current_user()
     rows = db.execute(
-        """
-        SELECT c.*, s.name AS student_name
-        FROM courses c
-        LEFT JOIN users s ON s.id = c.reserved_by
-        WHERE c.teacher_id = ?
-        ORDER BY c.id DESC
-        """,
+        "SELECT * FROM courses WHERE teacher_id = ? ORDER BY id DESC",
         (user["id"],),
     ).fetchall()
-    reserved_count = sum(1 for r in rows if r["reserved_by"] is not None)
     slots_map = get_slots_map(db, [r["id"] for r in rows])
+    reserved_count = sum(1 for slots in slots_map.values() for s in slots if s["reserved_by"])
     return render_template(
         "prof_dashboard.html", courses=rows, reserved_count=reserved_count, slots_map=slots_map
     )
+
+
+def allowed_photo(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_PHOTO_EXTENSIONS
+
+
+@app.route("/prof/profil", methods=["GET", "POST"])
+@login_required(role="prof")
+def prof_profil():
+    db = get_db()
+    user = current_user()
+
+    if request.method == "POST":
+        bio = request.form.get("bio", "").strip()
+        photo_file = request.files.get("photo")
+        photo_filename = user["photo"]
+
+        if photo_file and photo_file.filename:
+            if not allowed_photo(photo_file.filename):
+                flash("Format d'image non pris en charge (utilisez JPG, PNG ou WEBP).", "error")
+                return render_template("prof_profil.html", user=user)
+            ext = photo_file.filename.rsplit(".", 1)[1].lower()
+            new_filename = f"prof-{user['id']}.{ext}"
+            os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
+            photo_file.save(os.path.join(PROFILE_PHOTOS_DIR, new_filename))
+            photo_filename = new_filename
+
+        db.execute(
+            "UPDATE users SET bio = ?, photo = ? WHERE id = ?",
+            (bio or None, photo_filename, user["id"]),
+        )
+        db.commit()
+        flash("Profil mis à jour.", "success")
+        return redirect(url_for("prof_profil"))
+
+    return render_template("prof_profil.html", user=user)
 
 
 @app.route("/prof/creer", methods=["GET", "POST"])
@@ -637,16 +752,15 @@ def admin_dashboard():
     ).fetchall()
     etudiants = db.execute(
         """
-        SELECT u.*, (SELECT COUNT(*) FROM courses c WHERE c.reserved_by = u.id) AS course_count
+        SELECT u.*, (SELECT COUNT(*) FROM slots sl WHERE sl.reserved_by = u.id) AS course_count
         FROM users u WHERE u.role = 'etudiant' ORDER BY u.name
         """
     ).fetchall()
     courses_rows = db.execute(
         """
-        SELECT c.*, u.name AS teacher_name, s.name AS student_name
+        SELECT c.*, u.name AS teacher_name
         FROM courses c
         JOIN users u ON u.id = c.teacher_id
-        LEFT JOIN users s ON s.id = c.reserved_by
         ORDER BY c.id DESC
         """
     ).fetchall()
@@ -765,18 +879,19 @@ def admin_messagerie_thread(student_id, teacher_id):
 @login_required(role="etudiant")
 def etudiant():
     db = get_db()
-    rows = db.execute(
+    reservations = db.execute(
         """
-        SELECT c.*, u.name AS teacher_name
-        FROM courses c
+        SELECT sl.*, c.id AS course_id, c.title, c.subject, c.level, c.description,
+               c.teacher_id, u.name AS teacher_name
+        FROM slots sl
+        JOIN courses c ON c.id = sl.course_id
         JOIN users u ON u.id = c.teacher_id
-        WHERE c.reserved_by = ?
-        ORDER BY c.id DESC
+        WHERE sl.reserved_by = ?
+        ORDER BY sl.slot_date, sl.slot_time
         """,
         (current_user()["id"],),
     ).fetchall()
-    slots_map = get_slots_map(db, [r["id"] for r in rows])
-    return render_template("etudiant.html", courses=rows, slots_map=slots_map)
+    return render_template("etudiant.html", reservations=reservations)
 
 
 # ---------------------------------------------------------------------------
@@ -807,30 +922,28 @@ def etudiant_calendrier():
     year, month = resolve_month(request.args)
     (prev_year, prev_month), (next_year, next_month) = month_nav(year, month)
 
-    courses = db.execute(
+    rows = db.execute(
         """
-        SELECT c.*, u.name AS teacher_name
-        FROM courses c JOIN users u ON u.id = c.teacher_id
-        WHERE c.reserved_by = ?
+        SELECT sl.*, c.title, c.subject, c.level, u.name AS teacher_name
+        FROM slots sl
+        JOIN courses c ON c.id = sl.course_id
+        JOIN users u ON u.id = c.teacher_id
+        WHERE sl.reserved_by = ?
         """,
         (current_user()["id"],),
     ).fetchall()
-    slots_map = get_slots_map(db, [c["id"] for c in courses])
-    course_by_id = {c["id"]: c for c in courses}
 
     events_by_date = {}
-    for course_id, slots in slots_map.items():
-        c = course_by_id[course_id]
-        for s in slots:
-            events_by_date.setdefault(s["slot_date"], []).append(
-                {
-                    "title": c["title"],
-                    "subtitle": f"{c['subject']} · {c['level']} · {c['teacher_name']}",
-                    "time": s["slot_time"],
-                    "duration": s["duration_minutes"],
-                    "status": "reserve",
-                }
-            )
+    for s in rows:
+        events_by_date.setdefault(s["slot_date"], []).append(
+            {
+                "title": s["title"],
+                "subtitle": f"{s['subject']} · {s['level']} · {s['teacher_name']}",
+                "time": s["slot_time"],
+                "duration": s["duration_minutes"],
+                "status": "reserve",
+            }
+        )
 
     weeks = build_month_weeks(year, month, events_by_date)
     return render_template(
@@ -852,32 +965,30 @@ def prof_calendrier():
     year, month = resolve_month(request.args)
     (prev_year, prev_month), (next_year, next_month) = month_nav(year, month)
 
-    courses = db.execute(
+    rows = db.execute(
         """
-        SELECT c.*, s.name AS student_name
-        FROM courses c LEFT JOIN users s ON s.id = c.reserved_by
+        SELECT sl.*, c.title, c.subject, c.level, s.name AS student_name
+        FROM slots sl
+        JOIN courses c ON c.id = sl.course_id
+        LEFT JOIN users s ON s.id = sl.reserved_by
         WHERE c.teacher_id = ?
         """,
         (current_user()["id"],),
     ).fetchall()
-    slots_map = get_slots_map(db, [c["id"] for c in courses])
-    course_by_id = {c["id"]: c for c in courses}
 
     events_by_date = {}
-    for course_id, slots in slots_map.items():
-        c = course_by_id[course_id]
-        is_reserved = c["reserved_by"] is not None
-        for s in slots:
-            events_by_date.setdefault(s["slot_date"], []).append(
-                {
-                    "title": c["title"],
-                    "subtitle": f"{c['subject']} · {c['level']}"
-                    + (f" · {c['student_name']}" if is_reserved else " · Disponible"),
-                    "time": s["slot_time"],
-                    "duration": s["duration_minutes"],
-                    "status": "reserve" if is_reserved else "disponible",
-                }
-            )
+    for s in rows:
+        is_reserved = s["reserved_by"] is not None
+        events_by_date.setdefault(s["slot_date"], []).append(
+            {
+                "title": s["title"],
+                "subtitle": f"{s['subject']} · {s['level']}"
+                + (f" · {s['student_name']}" if is_reserved else " · Disponible"),
+                "time": s["slot_time"],
+                "duration": s["duration_minutes"],
+                "status": "reserve" if is_reserved else "disponible",
+            }
+        )
 
     weeks = build_month_weeks(year, month, events_by_date)
     return render_template(
@@ -1035,47 +1146,55 @@ def messagerie_conversation(contact_id):
 # ---------------------------------------------------------------------------
 # Routes — Visioconférence
 # ---------------------------------------------------------------------------
-def get_course_and_partner(course_id, user):
-    """Vérifie que l'utilisateur a le droit d'accéder à la visio de ce cours
-    (le prof qui l'a créé, ou l'élève qui l'a réservé) et renvoie
-    (cours, id_du_correspondant) ou (None, None) si l'accès est refusé."""
+def get_course_and_partner(course_id, slot_id, user):
+    """Vérifie que l'utilisateur a le droit d'accéder à la visio de ce créneau
+    (le prof qui a créé le cours, ou l'élève qui a réservé ce créneau précis)
+    et renvoie (cours, créneau, id_du_correspondant), ou (None, None, None)
+    si l'accès est refusé. La réservation étant désormais faite créneau par
+    créneau, un même cours peut être partagé par plusieurs élèves différents :
+    c'est le créneau, pas le cours, qui détermine le binôme prof/élève."""
     db = get_db()
     course = db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone()
     if not course:
-        return None, None
+        return None, None, None
+    slot = db.execute(
+        "SELECT * FROM slots WHERE id = ? AND course_id = ?", (slot_id, course_id)
+    ).fetchone()
+    if not slot:
+        return None, None, None
     if user["role"] == "prof" and course["teacher_id"] == user["id"]:
-        return course, course["reserved_by"]
-    if user["role"] == "etudiant" and course["reserved_by"] == user["id"]:
-        return course, course["teacher_id"]
-    return None, None
+        return course, slot, slot["reserved_by"]
+    if user["role"] == "etudiant" and slot["reserved_by"] == user["id"]:
+        return course, slot, course["teacher_id"]
+    return None, None, None
 
 
-@app.route("/cours/<int:course_id>/visio")
+@app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio")
 @login_required()
-def visio(course_id):
+def visio(course_id, slot_id):
     user = current_user()
     if user["role"] not in ("prof", "etudiant"):
         flash("La visioconférence est réservée aux professeurs et aux élèves.", "error")
         return redirect(dashboard_url_for(user["role"]))
 
-    course, partner_id = get_course_and_partner(course_id, user)
-    if not course:
-        flash("Vous n'avez pas accès à la visioconférence de ce cours.", "error")
+    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
+    if not course or not slot:
+        flash("Vous n'avez pas accès à la visioconférence de ce créneau.", "error")
         return redirect(dashboard_url_for(user["role"]))
     if not partner_id:
-        flash("Ce cours doit d'abord être réservé par un élève pour démarrer la visioconférence.", "error")
+        flash("Ce créneau doit d'abord être réservé par un élève pour démarrer la visioconférence.", "error")
         return redirect(dashboard_url_for(user["role"]))
 
     partner = get_db().execute("SELECT * FROM users WHERE id = ?", (partner_id,)).fetchone()
-    return render_template("visio.html", course=course, partner=partner)
+    return render_template("visio.html", course=course, slot=slot, partner=partner)
 
 
-@app.route("/cours/<int:course_id>/visio/envoyer", methods=["POST"])
+@app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/envoyer", methods=["POST"])
 @login_required()
-def visio_envoyer(course_id):
+def visio_envoyer(course_id, slot_id):
     user = current_user()
-    course, partner_id = get_course_and_partner(course_id, user)
-    if not course or not partner_id:
+    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
+    if not course or not slot or not partner_id:
         return jsonify({"error": "accès refusé"}), 403
 
     data = request.get_json(silent=True) or {}
@@ -1093,12 +1212,12 @@ def visio_envoyer(course_id):
     return jsonify({"ok": True})
 
 
-@app.route("/cours/<int:course_id>/visio/recevoir")
+@app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/recevoir")
 @login_required()
-def visio_recevoir(course_id):
+def visio_recevoir(course_id, slot_id):
     user = current_user()
-    course, partner_id = get_course_and_partner(course_id, user)
-    if not course or not partner_id:
+    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
+    if not course or not slot or not partner_id:
         return jsonify({"error": "accès refusé"}), 403
 
     since = request.args.get("since", 0, type=int)
