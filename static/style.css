@@ -401,10 +401,35 @@ label{font-size:0.83rem;font-weight:600;color:var(--text-muted);display:block;ma
   padding:0.2rem 0.5rem;
   border-radius:5px;
 }
-.visio-controls{display:flex;gap:0.7rem;flex-wrap:wrap;}
+.visio-controls{display:flex;gap:0.7rem;flex-wrap:wrap;margin-bottom:1.4rem;}
 @media (max-width:700px){
   .visio-grid{grid-template-columns:1fr;}
 }
+.visio-chat{
+  display:flex;
+  flex-direction:column;
+  height:360px;
+}
+.visio-chat-header{
+  font-weight:600;
+  font-size:0.9rem;
+  padding-bottom:0.6rem;
+  margin-bottom:0.6rem;
+  border-bottom:1px dashed var(--border);
+}
+.visio-chat-bubbles{
+  flex:1;
+  overflow-y:auto;
+  display:flex;
+  flex-direction:column;
+  gap:0.5rem;
+  padding-right:0.2rem;
+}
+.visio-chat-form{display:flex;gap:0.6rem;align-items:flex-end;margin-top:0.6rem;}
+.visio-chat-form textarea{resize:none;flex:1;}
+
+/* ---------- paramètres ---------- */
+.password-hint{font-size:0.8rem;color:var(--text-muted);margin:0.3rem 0 0;}
 
 /* ---------- calendar ---------- */
 .calendar-legend{display:flex;gap:1.2rem;margin-bottom:1rem;font-size:0.82rem;color:var(--text-muted);}
