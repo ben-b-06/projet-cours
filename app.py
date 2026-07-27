@@ -10,6 +10,7 @@ Puis ouvrir http://127.0.0.1:5000
 
 import os
 import json
+import secrets
 import calendar as calendar_mod
 from datetime import date
 from functools import wraps
@@ -30,6 +31,11 @@ app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo max pour les photos d
 # Choix fermés pour la matière et le niveau scolaire (du collège au lycée)
 MATIERES = ["Mathématiques", "Physique-Chimie", "Français", "SVT", "SES", "Histoire-Géographie"]
 NIVEAUX = ["6e", "5e", "4e", "3e", "2nde", "1re", "Terminale"]
+
+# Modalité d'un cours : uniquement en ligne, uniquement en présentiel, ou les deux
+# (dans ce dernier cas, l'élève choisit la modalité pour chaque créneau qu'il réserve).
+MODES = ["en_ligne", "presentiel", "les_deux"]
+MODE_LABELS = {"en_ligne": "En ligne", "presentiel": "En présentiel", "les_deux": "En ligne ou en présentiel"}
 
 # Identifiants du compte administrateur unique — aucun autre admin ne peut être créé.
 ADMIN_EMAIL = "admin@cours.fr"
@@ -76,7 +82,9 @@ def init_db():
             subject TEXT NOT NULL,
             level TEXT NOT NULL,
             description TEXT NOT NULL,
-            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
+            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            mode TEXT NOT NULL DEFAULT 'en_ligne' CHECK(mode IN ('en_ligne', 'presentiel', 'les_deux')),
+            city TEXT
         );
 
         -- Chaque créneau se réserve individuellement : un cours peut donc être
@@ -88,7 +96,8 @@ def init_db():
             slot_time TEXT NOT NULL,
             duration_minutes INTEGER NOT NULL,
             reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-            student_notes TEXT
+            student_notes TEXT,
+            slot_mode TEXT
         );
 
         -- Historique des mises en relation élève/prof : rempli dès qu'une
@@ -153,6 +162,14 @@ def init_db():
         db.execute("ALTER TABLE slots ADD COLUMN reserved_by INTEGER REFERENCES users(id)")
     if "student_notes" not in slot_columns:
         db.execute("ALTER TABLE slots ADD COLUMN student_notes TEXT")
+    if "slot_mode" not in slot_columns:
+        db.execute("ALTER TABLE slots ADD COLUMN slot_mode TEXT")
+
+    course_columns_full = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
+    if "mode" not in course_columns_full:
+        db.execute("ALTER TABLE courses ADD COLUMN mode TEXT NOT NULL DEFAULT 'en_ligne'")
+    if "city" not in course_columns_full:
+        db.execute("ALTER TABLE courses ADD COLUMN city TEXT")
 
     # Anciennes bases : la réservation se faisait au niveau du cours entier.
     # On la reporte sur chacun de ses créneaux, puis on abandonne les colonnes
@@ -440,6 +457,8 @@ def cours():
     level = request.args.get("level", "").strip()
     teacher_id = request.args.get("teacher_id", "").strip()
     min_rating = request.args.get("min_rating", "").strip()
+    mode = request.args.get("mode", "").strip()
+    city = request.args.get("city", "").strip()
 
     # On ne liste que les cours ayant au moins un créneau encore libre : la
     # réservation se fait désormais créneau par créneau, pas cours entier.
@@ -458,6 +477,15 @@ def cours():
     if level in NIVEAUX:
         conditions.append("c.level = ?")
         params.append(level)
+
+    if mode == "en_ligne":
+        conditions.append("c.mode IN ('en_ligne', 'les_deux')")
+    elif mode == "presentiel":
+        conditions.append("c.mode IN ('presentiel', 'les_deux')")
+
+    if city:
+        conditions.append("c.city LIKE ?")
+        params.append(f"%{city}%")
 
     if teacher_id.isdigit():
         conditions.append("c.teacher_id = ?")
@@ -496,7 +524,16 @@ def cours():
         matieres=MATIERES,
         niveaux=NIVEAUX,
         teachers=teachers,
-        filters={"q": q, "subject": subject, "level": level, "teacher_id": teacher_id, "min_rating": min_rating},
+        mode_labels=MODE_LABELS,
+        filters={
+            "q": q,
+            "subject": subject,
+            "level": level,
+            "teacher_id": teacher_id,
+            "min_rating": min_rating,
+            "mode": mode,
+            "city": city,
+        },
     )
 
 
@@ -516,14 +553,21 @@ def inscription_cours(course_id):
         flash("Sélectionnez au moins un créneau à réserver.", "error")
         return redirect(url_for("cours"))
 
+    # Modalité effective du créneau : fixée par le cours, sauf si celui-ci
+    # propose les deux, auquel cas l'élève choisit pour chaque créneau réservé.
     reserved = 0
     for slot_id in slot_ids:
+        if course["mode"] == "les_deux":
+            chosen = request.form.get(f"slot_mode_{slot_id}", "")
+            slot_mode = chosen if chosen in ("en_ligne", "presentiel") else "en_ligne"
+        else:
+            slot_mode = course["mode"]
         cur = db.execute(
             """
-            UPDATE slots SET reserved_by = ?, student_notes = ?
+            UPDATE slots SET reserved_by = ?, student_notes = ?, slot_mode = ?
             WHERE id = ? AND course_id = ? AND reserved_by IS NULL
             """,
-            (current_user()["id"], notes, slot_id, course_id),
+            (current_user()["id"], notes, slot_mode, slot_id, course_id),
         )
         reserved += cur.rowcount
 
@@ -557,7 +601,7 @@ def desinscription_cours(course_id, slot_id):
     db = get_db()
     db.execute(
         """
-        UPDATE slots SET reserved_by = NULL, student_notes = NULL
+        UPDATE slots SET reserved_by = NULL, student_notes = NULL, slot_mode = NULL
         WHERE id = ? AND course_id = ? AND reserved_by = ?
         """,
         (slot_id, course_id, current_user()["id"]),
@@ -710,6 +754,8 @@ def prof_creer():
         subject = request.form.get("subject", "")
         level = request.form.get("level", "")
         description = request.form.get("description", "").strip()
+        mode = request.form.get("mode", "")
+        city = request.form.get("city", "").strip()
 
         slot_dates = request.form.getlist("slot_date[]")
         slot_times = request.form.getlist("slot_time[]")
@@ -724,6 +770,12 @@ def prof_creer():
             errors.append("Merci de choisir un niveau scolaire dans la liste proposée.")
         if not description:
             errors.append("Merci de renseigner une description.")
+        if mode not in MODES:
+            errors.append("Merci de choisir si le cours a lieu en ligne, en présentiel, ou les deux.")
+        if mode in ("presentiel", "les_deux") and not city:
+            errors.append("Merci de renseigner la ville où le cours a lieu en présentiel.")
+        if mode == "en_ligne":
+            city = ""
 
         slots = []
         for date_val, time_val, duration_val in zip(slot_dates, slot_times, slot_durations):
@@ -753,13 +805,15 @@ def prof_creer():
                 "prof_creer.html",
                 matieres=MATIERES,
                 niveaux=NIVEAUX,
+                modes=MODES,
+                mode_labels=MODE_LABELS,
                 form=request.form,
             )
 
         db = get_db()
         cur = db.execute(
-            "INSERT INTO courses(title, subject, level, description, teacher_id) VALUES (?, ?, ?, ?, ?)",
-            (title, subject, level, description, current_user()["id"]),
+            "INSERT INTO courses(title, subject, level, description, teacher_id, mode, city) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (title, subject, level, description, current_user()["id"], mode, city or None),
         )
         course_id = cur.lastrowid
         for date_val, time_val, duration in slots:
@@ -771,7 +825,9 @@ def prof_creer():
         flash(f"Cours publié : {title}", "success")
         return redirect(url_for("prof_dashboard"))
 
-    return render_template("prof_creer.html", matieres=MATIERES, niveaux=NIVEAUX, form={})
+    return render_template(
+        "prof_creer.html", matieres=MATIERES, niveaux=NIVEAUX, modes=MODES, mode_labels=MODE_LABELS, form={}
+    )
 
 
 @app.route("/prof/cours/<int:course_id>/supprimer", methods=["POST"])
@@ -932,7 +988,7 @@ def etudiant():
     reservations = db.execute(
         """
         SELECT sl.*, c.id AS course_id, c.title, c.subject, c.level, c.description,
-               c.teacher_id, u.name AS teacher_name
+               c.teacher_id, c.city AS course_city, u.name AS teacher_name
         FROM slots sl
         JOIN courses c ON c.id = sl.course_id
         JOIN users u ON u.id = c.teacher_id
@@ -1280,9 +1336,30 @@ def visio(course_id, slot_id):
     if not partner_id:
         flash("Ce créneau doit d'abord être réservé par un élève pour démarrer la visioconférence.", "error")
         return redirect(dashboard_url_for(user["role"]))
+    if slot["slot_mode"] != "en_ligne":
+        flash("Ce créneau se déroule en présentiel : pas de visioconférence pour ce cours.", "error")
+        return redirect(dashboard_url_for(user["role"]))
 
-    partner = get_db().execute("SELECT * FROM users WHERE id = ?", (partner_id,)).fetchone()
-    return render_template("visio.html", course=course, slot=slot, partner=partner)
+    db = get_db()
+    partner = db.execute("SELECT * FROM users WHERE id = ?", (partner_id,)).fetchone()
+
+    # Historique des messages échangés avec ce correspondant, affiché dans le
+    # panneau de chat de la visio (mêmes messages que dans la messagerie).
+    chat_messages = db.execute(
+        """
+        SELECT * FROM messages
+        WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+        ORDER BY id ASC
+        """,
+        (user["id"], partner_id, partner_id, user["id"]),
+    ).fetchall()
+    db.execute(
+        "UPDATE messages SET read_at = CURRENT_TIMESTAMP WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
+        (partner_id, user["id"]),
+    )
+    db.commit()
+
+    return render_template("visio.html", course=course, slot=slot, partner=partner, chat_messages=chat_messages)
 
 
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/envoyer", methods=["POST"])
@@ -1334,6 +1411,148 @@ def visio_recevoir(course_id, slot_id):
             ]
         }
     )
+
+
+@app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/message/envoyer", methods=["POST"])
+@login_required()
+def visio_chat_envoyer(course_id, slot_id):
+    """Envoie un message de chat pendant la visio. Les messages sont stockés
+    dans la même table que la messagerie classique : ils apparaissent donc
+    aussi dans les conversations habituelles."""
+    user = current_user()
+    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
+    if not course or not slot or not partner_id:
+        return jsonify({"error": "accès refusé"}), 403
+
+    data = request.get_json(silent=True) or {}
+    body = (data.get("body") or "").strip()
+    if not body:
+        return jsonify({"error": "message vide"}), 400
+
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
+        (user["id"], partner_id, body),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM messages WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return jsonify(
+        {
+            "message": {
+                "id": row["id"],
+                "body": row["body"],
+                "created_at": row["created_at"],
+                "sender_id": row["sender_id"],
+            }
+        }
+    )
+
+
+@app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/message/recevoir")
+@login_required()
+def visio_chat_recevoir(course_id, slot_id):
+    """Poll des nouveaux messages de chat échangés avec le correspondant de
+    cette visio, pour affichage en direct dans le panneau de messagerie."""
+    user = current_user()
+    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
+    if not course or not slot or not partner_id:
+        return jsonify({"error": "accès refusé"}), 403
+
+    since = request.args.get("since", 0, type=int)
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT * FROM messages
+        WHERE ((sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?))
+          AND id > ?
+        ORDER BY id ASC
+        """,
+        (user["id"], partner_id, partner_id, user["id"], since),
+    ).fetchall()
+    # Les messages reçus du correspondant pendant la visio sont marqués lus
+    # puisque l'utilisateur est en train de regarder la conversation.
+    db.execute(
+        "UPDATE messages SET read_at = CURRENT_TIMESTAMP WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
+        (partner_id, user["id"]),
+    )
+    db.commit()
+    return jsonify(
+        {
+            "messages": [
+                {
+                    "id": r["id"],
+                    "body": r["body"],
+                    "created_at": r["created_at"],
+                    "sender_id": r["sender_id"],
+                }
+                for r in rows
+            ]
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes — Paramètres (changement de mot de passe)
+# ---------------------------------------------------------------------------
+@app.route("/parametres", methods=["GET", "POST"])
+@login_required()
+def parametres():
+    user = current_user()
+    if request.method == "POST":
+        current_password = request.form.get("current_password", "")
+        new_password = request.form.get("new_password", "")
+        confirm_password = request.form.get("confirm_password", "")
+
+        if not check_password_hash(user["password_hash"], current_password):
+            flash("Mot de passe actuel incorrect.", "error")
+            return render_template("parametres.html", user=user)
+        if len(new_password) < 4:
+            flash("Le nouveau mot de passe doit contenir au moins 4 caractères.", "error")
+            return render_template("parametres.html", user=user)
+        if new_password != confirm_password:
+            flash("Les deux mots de passe saisis ne correspondent pas.", "error")
+            return render_template("parametres.html", user=user)
+
+        db = get_db()
+        db.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (generate_password_hash(new_password), user["id"]),
+        )
+        db.commit()
+        flash("Mot de passe mis à jour avec succès.", "success")
+        return redirect(url_for("parametres"))
+
+    return render_template("parametres.html", user=user)
+
+
+@app.route("/admin/utilisateurs/<int:user_id>/reinitialiser-mot-de-passe", methods=["POST"])
+@login_required(role="admin")
+def admin_reinitialiser_mot_de_passe(user_id):
+    """Permet à l'administrateur de réinitialiser le mot de passe d'un
+    professeur ou d'un élève qui ne peut plus se connecter (mot de passe
+    oublié). Un nouveau mot de passe temporaire est généré et affiché une
+    seule fois à l'admin, à transmettre à l'utilisateur concerné."""
+    db = get_db()
+    target = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not target:
+        flash("Utilisateur introuvable.", "error")
+        return redirect(url_for("admin_dashboard"))
+    if target["role"] == "admin":
+        flash("Impossible de réinitialiser le mot de passe d'un compte administrateur.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    new_password = secrets.token_urlsafe(6)
+    db.execute(
+        "UPDATE users SET password_hash = ? WHERE id = ?",
+        (generate_password_hash(new_password), user_id),
+    )
+    db.commit()
+    flash(
+        f"Nouveau mot de passe temporaire pour {target['name']} ({target['email']}) : {new_password} "
+        "— transmettez-le lui, il pourra le changer ensuite dans ses Paramètres.",
+        "success",
+    )
+    return redirect(url_for("admin_dashboard"))
 
 
 # ---------------------------------------------------------------------------
