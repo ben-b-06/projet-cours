@@ -590,3 +590,42 @@ label{font-size:0.83rem;font-weight:600;color:var(--text-muted);display:block;ma
 @media (prefers-reduced-motion: reduce){
   *{transition:none !important;}
 }
+
+/* ---------------------------------------------------------------------- */
+/* Notes des professeurs                                                  */
+/* ---------------------------------------------------------------------- */
+.teacher-rating{
+  display:inline-block;
+  font-size:0.78rem;
+  font-weight:600;
+  color:var(--gold-dark);
+  margin-left:0.4rem;
+}
+.teacher-rating-count{font-weight:400;color:var(--text-muted);}
+.teacher-rating-empty{color:var(--text-muted);font-weight:400;font-style:italic;}
+
+.rate-teacher{
+  display:flex;
+  align-items:center;
+  gap:0.5rem;
+  flex-wrap:wrap;
+  margin-top:0.7rem;
+  padding-top:0.6rem;
+  border-top:1px dashed var(--border);
+  font-size:0.8rem;
+  color:var(--text-muted);
+}
+.star-picker{display:inline-flex;gap:0.15rem;}
+.star-btn{
+  background:none;
+  border:none;
+  cursor:pointer;
+  font-size:1.15rem;
+  line-height:1;
+  color:var(--border);
+  padding:0.1rem;
+}
+.star-btn.is-filled{color:var(--gold);}
+.star-picker:has(.star-btn:hover) .star-btn:hover,
+.star-btn:hover{color:var(--gold-dark);}
+.rate-teacher-current{font-size:0.76rem;color:var(--text-muted);}
