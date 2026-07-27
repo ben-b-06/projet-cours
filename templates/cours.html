@@ -44,6 +44,15 @@
       </select>
     </div>
     <div class="field">
+      <label for="min_rating">Note min. du prof</label>
+      <select id="min_rating" name="min_rating">
+        <option value="">Toutes</option>
+        {% for note in [4, 3, 2, 1] %}
+        <option value="{{ note }}" {{ 'selected' if filters.min_rating == note|string else '' }}>{{ '★' * note }}{{ '☆' * (5 - note) }} et plus</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
       <button class="btn btn-gold" type="submit">Filtrer</button>
     </div>
   </form>
@@ -58,10 +67,16 @@
       <h3>{{ c['title'] }}</h3>
       <p class="course-desc">{{ c['description'] }}</p>
 
+      {% set tr = ratings_map.get(c['teacher_id']) %}
       <div class="teacher-line">
         {{ macros.avatar(c['teacher_name'], c['teacher_photo'], 32) }}
         <div>
           <span class="teacher-name">{{ c['teacher_name'] }}</span>
+          {% if tr %}
+            <span class="teacher-rating" title="{{ tr.count }} note(s)">★ {{ '%.1f'|format(tr.avg) }}<span class="teacher-rating-count"> ({{ tr.count }})</span></span>
+          {% else %}
+            <span class="teacher-rating teacher-rating-empty">Pas encore noté</span>
+          {% endif %}
           {% if c['teacher_bio'] %}
             <p class="teacher-bio">{{ c['teacher_bio'] }}</p>
           {% endif %}

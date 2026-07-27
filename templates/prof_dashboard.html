@@ -23,6 +23,15 @@
       <div class="stat-num">{{ reserved_count }}</div>
       <div class="stat-label">Créneaux réservés</div>
     </div>
+    <div class="card stat-card">
+      {% if my_rating %}
+        <div class="stat-num">★ {{ '%.1f'|format(my_rating.avg) }}</div>
+        <div class="stat-label">Note moyenne ({{ my_rating.count }} avis)</div>
+      {% else %}
+        <div class="stat-num">—</div>
+        <div class="stat-label">Pas encore de note</div>
+      {% endif %}
+    </div>
   </div>
 
   <div class="section-title"><h2>Mes cours</h2></div>

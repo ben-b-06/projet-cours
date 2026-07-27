@@ -29,6 +29,17 @@
           <button class="btn-danger-outline">Annuler ce créneau</button>
         </form>
       </div>
+
+      {% set my_note = my_ratings.get(r['teacher_id']) %}
+      <form method="post" action="{{ url_for('noter_prof', teacher_id=r['teacher_id']) }}" class="rate-teacher">
+        <span class="rate-teacher-label">{{ 'Modifier ma note pour ' if my_note else 'Noter ' }}{{ r['teacher_name'] }} :</span>
+        <span class="star-picker">
+          {% for n in [1, 2, 3, 4, 5] %}
+            <button type="submit" name="rating" value="{{ n }}" class="star-btn {{ 'is-filled' if my_note and n <= my_note else '' }}" title="{{ n }}/5">★</button>
+          {% endfor %}
+        </span>
+        {% if my_note %}<span class="rate-teacher-current">(actuellement {{ my_note }}/5)</span>{% endif %}
+      </form>
     </div>
     {% endfor %}
   </div>
