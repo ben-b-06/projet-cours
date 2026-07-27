@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+  <span class="eyebrow">Administration / Messagerie</span>
+  <h2 style="font-size:1.5rem;margin:0 0 0.4rem;">Toutes les conversations</h2>
+  <p style="color:var(--text-muted);font-size:0.9rem;margin:0 0 1.6rem;">
+    En tant qu'administrateur, vous pouvez consulter (en lecture seule) les échanges entre chaque élève et chaque professeur.
+  </p>
+
+  {% if conversations %}
+  <div class="card" style="overflow:hidden;">
+    {% for c in conversations %}
+    <a href="{{ url_for('admin_messagerie_thread', student_id=c['student_id'], teacher_id=c['teacher_id']) }}"
+       class="msg-contact" style="border-bottom:1px solid var(--border);">
+      <span class="msg-contact-top">
+        <span class="msg-contact-name">{{ c['student_name'] }} ↔ {{ c['teacher_name'] }}</span>
+        <span class="mono" style="font-size:0.72rem;color:var(--text-muted);">{{ c['message_count'] }} message(s)</span>
+      </span>
+      <span class="msg-contact-preview">
+        {% if c['last_body'] %}{{ c['last_body'][:70] }}{% if c['last_body']|length > 70 %}…{% endif %}{% else %}Aucun message pour le moment{% endif %}
+      </span>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-state">Aucune mise en relation élève/professeur pour le moment.</div>
+  {% endif %}
+{% endblock %}
