@@ -39,7 +39,7 @@
       <h3>{{ s['name'] }}</h3>
       <p class="course-desc mono" style="font-size:0.82rem;">{{ s['email'] }}</p>
       <div class="course-meta">
-        <span>{{ s['course_count'] }} cours suivi(s)</span>
+        <span>{{ s['course_count'] }} créneau(x) réservé(s)</span>
         <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=s['id']) }}"
               onsubmit="return confirm('Supprimer cet étudiant ?');">
           <button class="btn-danger-outline">Supprimer</button>
@@ -60,9 +60,10 @@
       <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
       <h3>{{ c['title'] }}</h3>
       <p class="course-desc">{{ c['description'] }}</p>
-      {{ macros.slot_list(slots_map.get(c['id'], [])) }}
+      {% set course_slots = slots_map.get(c['id'], []) %}
+      {{ macros.slot_list(course_slots) }}
       <div class="course-meta">
-        <span>Par {{ c['teacher_name'] }} · {{ 'Réservé par ' + c['student_name'] if c['student_name'] else 'Disponible' }}</span>
+        <span>Par {{ c['teacher_name'] }} · {{ course_slots|selectattr('reserved_by')|list|length }} / {{ course_slots|length }} créneau(x) réservé(s)</span>
         <form method="post" action="{{ url_for('admin_supprimer_cours', course_id=c['id']) }}"
               onsubmit="return confirm('Supprimer ce cours ?');">
           <button class="btn-danger-outline">Supprimer</button>

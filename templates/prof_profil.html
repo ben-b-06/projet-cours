@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% import "_macros.html" as macros %}
+{% block content %}
+  <span class="eyebrow">Professeur / Mon profil</span>
+  <div class="card form-card wide">
+    <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Modifier mon profil</h2>
+
+    <div class="profile-current">
+      {{ macros.avatar(user['name'], user['photo'], 72) }}
+      <div>
+        <span class="teacher-name" style="font-size:1rem;">{{ user['name'] }}</span>
+        <p class="mono" style="font-size:0.8rem;color:var(--text-muted);margin:0.2rem 0 0;">{{ user['email'] }}</p>
+      </div>
+    </div>
+
+    <form method="post" enctype="multipart/form-data">
+      <div class="field">
+        <label>Photo de profil</label>
+        <input type="file" name="photo" accept=".jpg,.jpeg,.png,.webp">
+        <p class="slot-help">JPG, PNG ou WEBP, 5 Mo maximum. Laissez vide pour conserver la photo actuelle.</p>
+      </div>
+
+      <div class="field">
+        <label>Description</label>
+        <textarea name="bio" rows="5" placeholder="Présentez-vous aux élèves : votre parcours, vos matières, votre approche pédagogique…">{{ user['bio'] or '' }}</textarea>
+      </div>
+
+      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;margin-top:0.6rem;">Enregistrer mon profil</button>
+    </form>
+  </div>
+{% endblock %}

@@ -41,6 +41,7 @@
 <ul>
 <li><a class="tree-link {{ 'active' if request.endpoint=='prof_dashboard' else '' }}" href="{{ url_for('prof_dashboard') }}"><span class="dot"></span>Tableau de bord</a></li>
 <li><a class="tree-link {{ 'active' if request.endpoint=='prof_creer' else '' }}" href="{{ url_for('prof_creer') }}"><span class="dot"></span>Créer un cours</a></li>
+<li><a class="tree-link {{ 'active' if request.endpoint=='prof_profil' else '' }}" href="{{ url_for('prof_profil') }}"><span class="dot"></span>Mon profil</a></li>
 <li><a class="tree-link {{ 'active' if request.endpoint=='prof_calendrier' else '' }}" href="{{ url_for('prof_calendrier') }}"><span class="dot"></span>Calendrier</a></li>
 <li><a class="tree-link {{ 'active' if request.endpoint in ['messagerie','messagerie_conversation'] else '' }}" href="{{ url_for('messagerie') }}"><span class="dot"></span>Messagerie{% if unread_messages_total %} ({{ unread_messages_total }}){% endif %}</a></li>
 </ul>

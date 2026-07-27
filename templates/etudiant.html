@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% import "_macros.html" as macros %}
 {% block content %}
   <span class="eyebrow">Étudiant / Mes cours</span>
   <div class="row-between" style="margin-bottom:1.6rem;">
@@ -7,25 +6,27 @@
     <a class="btn btn-outline" href="{{ url_for('etudiant_calendrier') }}">Voir le calendrier</a>
   </div>
 
-  {% if courses %}
+  {% if reservations %}
   <div class="course-grid">
-    {% for c in courses %}
+    {% for r in reservations %}
     <div class="card course-card">
-      <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
-      <h3>{{ c['title'] }}</h3>
-      <p class="course-desc">{{ c['description'] }}</p>
-      {{ macros.slot_list(slots_map.get(c['id'], [])) }}
-      {% if c['student_notes'] %}
+      <span class="course-cat">{{ r['subject'] }} · {{ r['level'] }}</span>
+      <h3>{{ r['title'] }}</h3>
+      <p class="course-desc">{{ r['description'] }}</p>
+      <ul class="slot-list">
+        <li><span class="slot-date">{{ r['slot_date'] }}</span> · {{ r['slot_time'] }} · {{ r['duration_minutes']|duree_lisible }}</li>
+      </ul>
+      {% if r['student_notes'] %}
         <p style="font-size:0.82rem;color:var(--text-muted);background:var(--paper);padding:0.5rem 0.7rem;border-radius:8px;margin:0;">
-          <strong>Sujets à travailler :</strong> {{ c['student_notes'] }}
+          <strong>Sujets à travailler :</strong> {{ r['student_notes'] }}
         </p>
       {% endif %}
       <div class="course-meta">
-        <span>Par {{ c['teacher_name'] }}</span>
-        <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('messagerie_conversation', contact_id=c['teacher_id']) }}">Écrire au prof</a>
-        <a class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('visio', course_id=c['id']) }}">🎥 Visioconférence</a>
-        <form method="post" action="{{ url_for('desinscription_cours', course_id=c['id']) }}">
-          <button class="btn-danger-outline">Se désinscrire</button>
+        <span>Par {{ r['teacher_name'] }}</span>
+        <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('messagerie_conversation', contact_id=r['teacher_id']) }}">Écrire au prof</a>
+        <a class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('visio', course_id=r['course_id'], slot_id=r['id']) }}">🎥 Visioconférence</a>
+        <form method="post" action="{{ url_for('desinscription_cours', course_id=r['course_id'], slot_id=r['id']) }}">
+          <button class="btn-danger-outline">Annuler ce créneau</button>
         </form>
       </div>
     </div>
@@ -33,7 +34,7 @@
   </div>
   {% else %}
   <div class="empty-state">
-    Vous n'êtes inscrit(e) à aucun cours pour le moment.
+    Vous n'avez réservé aucun créneau pour le moment.
     <div><a class="btn btn-gold" href="{{ url_for('cours') }}">Parcourir les cours</a></div>
   </div>
   {% endif %}

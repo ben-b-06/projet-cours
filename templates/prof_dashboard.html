@@ -3,8 +3,12 @@
 {% block content %}
   <span class="eyebrow">Professeur / Tableau de bord</span>
   <div class="row-between" style="margin-bottom:1.6rem;">
-    <h2 style="font-size:1.5rem;margin:0;">Bonjour, {{ current_user['name'] }}</h2>
-    <div style="display:flex;gap:0.6rem;">
+    <div style="display:flex;align-items:center;gap:0.7rem;">
+      {{ macros.avatar(current_user['name'], current_user['photo'], 44) }}
+      <h2 style="font-size:1.5rem;margin:0;">Bonjour, {{ current_user['name'] }}</h2>
+    </div>
+    <div style="display:flex;gap:0.6rem;flex-wrap:wrap;">
+      <a class="btn btn-outline" href="{{ url_for('prof_profil') }}">Mon profil</a>
       <a class="btn btn-outline" href="{{ url_for('prof_calendrier') }}">Voir le calendrier</a>
       <a class="btn btn-gold" href="{{ url_for('prof_creer') }}">+ Créer un cours</a>
     </div>
@@ -17,7 +21,7 @@
     </div>
     <div class="card stat-card">
       <div class="stat-num">{{ reserved_count }}</div>
-      <div class="stat-label">Cours réservés</div>
+      <div class="stat-label">Créneaux réservés</div>
     </div>
   </div>
 
@@ -26,24 +30,28 @@
   {% if courses %}
   <div class="course-grid">
     {% for c in courses %}
+    {% set course_slots = slots_map.get(c['id'], []) %}
     <div class="card course-card">
       <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
       <h3>{{ c['title'] }}</h3>
       <p class="course-desc">{{ c['description'] }}</p>
-      {{ macros.slot_list(slots_map.get(c['id'], [])) }}
-      {% if c['reserved_by'] and c['student_notes'] %}
-        <p style="font-size:0.82rem;color:var(--text-muted);background:var(--paper);padding:0.5rem 0.7rem;border-radius:8px;margin:0;">
-          <strong>Sujets à travailler :</strong> {{ c['student_notes'] }}
-        </p>
-      {% endif %}
+      {{ macros.slot_list(course_slots) }}
+
+      {% for s in course_slots if s['reserved_by'] %}
+        <div class="slot-contact-row">
+          <span class="badge-enrolled">{{ s['slot_date'] }} {{ s['slot_time'] }} · {{ s['student_name'] }}</span>
+          {% if s['student_notes'] %}
+            <span class="mono" style="font-size:0.76rem;color:var(--text-muted);">{{ s['student_notes'] }}</span>
+          {% endif %}
+          <a class="btn btn-outline" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('messagerie_conversation', contact_id=s['reserved_by']) }}">Écrire à l'élève</a>
+          <a class="btn btn-sage" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('visio', course_id=c['id'], slot_id=s['id']) }}">🎥 Visio</a>
+        </div>
+      {% endfor %}
+
       <div class="course-meta">
-        {% if c['reserved_by'] %}
-          <span class="badge-enrolled">Réservé par {{ c['student_name'] }}</span>
-          <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('messagerie_conversation', contact_id=c['reserved_by']) }}">Écrire à l'élève</a>
-          <a class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('visio', course_id=c['id']) }}">🎥 Visioconférence</a>
-        {% else %}
-          <span class="mono" style="font-size:0.78rem;color:var(--text-muted);">Disponible</span>
-        {% endif %}
+        <span class="mono" style="font-size:0.78rem;color:var(--text-muted);">
+          {{ course_slots|selectattr('reserved_by')|list|length }} / {{ course_slots|length }} créneau(x) réservé(s)
+        </span>
         <form method="post" action="{{ url_for('prof_supprimer', course_id=c['id']) }}" onsubmit="return confirm('Supprimer ce cours ?');">
           <button class="btn-danger-outline">Supprimer</button>
         </form>

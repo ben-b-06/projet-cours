@@ -5,7 +5,7 @@
     <h2 style="font-size:1.4rem;margin:0;">{{ course['title'] }}</h2>
   </div>
   <p style="color:var(--text-muted);font-size:0.9rem;margin:0 0 1.4rem;">
-    Appel avec <strong>{{ partner['name'] }}</strong>. Autorisez l'accès à votre caméra et votre micro pour commencer.
+    Créneau du {{ slot['slot_date'] }} à {{ slot['slot_time'] }} · Appel avec <strong>{{ partner['name'] }}</strong>. Autorisez l'accès à votre caméra et votre micro pour commencer.
   </p>
 
   <div class="visio-status" id="visioStatus">En attente de démarrage…</div>
@@ -30,8 +30,8 @@
 
   <script>
     const courseId = {{ course['id'] }};
-    const sendUrl = "{{ url_for('visio_envoyer', course_id=course['id']) }}";
-    const pollUrl = "{{ url_for('visio_recevoir', course_id=course['id']) }}";
+    const sendUrl = "{{ url_for('visio_envoyer', course_id=course['id'], slot_id=slot['id']) }}";
+    const pollUrl = "{{ url_for('visio_recevoir', course_id=course['id'], slot_id=slot['id']) }}";
 
     const statusEl = document.getElementById('visioStatus');
     const localVideo = document.getElementById('localVideo');

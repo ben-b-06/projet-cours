@@ -2,10 +2,25 @@
   {% if slots %}
     <ul class="slot-list">
       {% for s in slots %}
-        <li><span class="slot-date">{{ s['slot_date'] }}</span> · {{ s['slot_time'] }} · {{ s['duration_minutes']|duree_lisible }}</li>
+        <li>
+          <span class="slot-date">{{ s['slot_date'] }}</span> · {{ s['slot_time'] }} · {{ s['duration_minutes']|duree_lisible }}
+          {% if s['reserved_by'] %}
+            <span class="slot-status slot-status-reserved">Réservé{{ ' · ' + s['student_name'] if s['student_name'] else '' }}</span>
+          {% else %}
+            <span class="slot-status slot-status-dispo">Disponible</span>
+          {% endif %}
+        </li>
       {% endfor %}
     </ul>
   {% else %}
     <p class="slot-empty">Aucun créneau programmé.</p>
+  {% endif %}
+{% endmacro %}
+
+{% macro avatar(name, photo, size=36) %}
+  {% if photo %}
+    <img class="avatar-img" src="{{ url_for('static', filename='uploads/profils/' + photo) }}" alt="{{ name }}" style="width:{{ size }}px;height:{{ size }}px;">
+  {% else %}
+    <span class="avatar-fallback" style="width:{{ size }}px;height:{{ size }}px;font-size:{{ (size * 0.45)|round|int }}px;">{{ (name[0] if name else '?')|upper }}</span>
   {% endif %}
 {% endmacro %}

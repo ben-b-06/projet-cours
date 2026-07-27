@@ -8,7 +8,7 @@
     </div>
   </div>
   <p style="color:var(--text-muted);font-size:0.9rem;margin:-0.6rem 0 1.4rem;">
-    Chaque cours est un accompagnement individuel : une fois réservé par un élève, il n'apparaît plus pour les autres.
+    Réservez un ou plusieurs créneaux précis avec le prof de votre choix : chaque créneau réservé n'apparaît plus pour les autres élèves.
   </p>
 
   <form method="get" action="{{ url_for('cours') }}" class="card filter-bar">
@@ -51,30 +51,55 @@
   {% if courses %}
   <div class="course-grid">
     {% for c in courses %}
+    {% set course_slots = slots_map.get(c['id'], []) %}
+    {% set free_slots = course_slots|selectattr('reserved_by', 'none')|list %}
     <div class="card course-card">
       <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
       <h3>{{ c['title'] }}</h3>
       <p class="course-desc">{{ c['description'] }}</p>
-      {{ macros.slot_list(slots_map.get(c['id'], [])) }}
-      <div class="course-meta">
-        <span>Par {{ c['teacher_name'] }}</span>
-        {% if current_user and current_user['role'] == 'etudiant' %}
-          {% if c['reserved_by'] == current_user['id'] %}
-            <span class="badge-enrolled">Réservé par vous</span>
-          {% else %}
-            <details>
-              <summary class="btn btn-sage" style="font-size:0.8rem;padding:0.45rem 0.8rem;display:inline-block;">Réserver ce cours</summary>
-              <form method="post" action="{{ url_for('inscription_cours', course_id=c['id']) }}" style="margin-top:0.7rem;">
-                <div class="field">
-                  <label>Sujets à travailler avec le prof (optionnel)</label>
-                  <textarea name="notes" rows="2" placeholder="Ex. : révision des fractions, méthodologie de la dissertation…"></textarea>
-                </div>
-                <button class="btn btn-sage" style="font-size:0.8rem;padding:0.45rem 0.8rem;">Confirmer la réservation</button>
-              </form>
-            </details>
+
+      <div class="teacher-line">
+        {{ macros.avatar(c['teacher_name'], c['teacher_photo'], 32) }}
+        <div>
+          <span class="teacher-name">{{ c['teacher_name'] }}</span>
+          {% if c['teacher_bio'] %}
+            <p class="teacher-bio">{{ c['teacher_bio'] }}</p>
           {% endif %}
-        {% elif not current_user %}
-          <a class="btn btn-outline" style="font-size:0.78rem;padding:0.45rem 0.8rem;" href="{{ url_for('connexion') }}">Se connecter</a>
+        </div>
+      </div>
+
+      {% if current_user and current_user['role'] == 'etudiant' and free_slots %}
+        <form method="post" action="{{ url_for('inscription_cours', course_id=c['id']) }}">
+          <ul class="slot-list slot-list-picker">
+            {% for s in course_slots %}
+              <li>
+                <label class="slot-pick {{ 'is-taken' if s['reserved_by'] and s['reserved_by'] != current_user['id'] else '' }} {{ 'is-mine' if s['reserved_by'] == current_user['id'] else '' }}">
+                  {% if not s['reserved_by'] %}
+                    <input type="checkbox" name="slot_id[]" value="{{ s['id'] }}">
+                  {% endif %}
+                  <span class="slot-date">{{ s['slot_date'] }}</span> · {{ s['slot_time'] }} · {{ s['duration_minutes']|duree_lisible }}
+                  {% if s['reserved_by'] == current_user['id'] %}
+                    <span class="slot-status slot-status-reserved">Réservé par vous</span>
+                  {% elif s['reserved_by'] %}
+                    <span class="slot-status slot-status-reserved">Complet</span>
+                  {% endif %}
+                </label>
+              </li>
+            {% endfor %}
+          </ul>
+          <div class="field" style="margin-top:0.6rem;">
+            <label>Sujets à travailler avec le prof (optionnel)</label>
+            <textarea name="notes" rows="2" placeholder="Ex. : révision des fractions, méthodologie de la dissertation…"></textarea>
+          </div>
+          <button class="btn btn-sage" type="submit" style="font-size:0.8rem;padding:0.45rem 0.8rem;">Réserver les créneaux sélectionnés</button>
+        </form>
+      {% else %}
+        {{ macros.slot_list(course_slots) }}
+      {% endif %}
+
+      <div class="course-meta">
+        {% if not current_user %}
+          <a class="btn btn-outline" style="font-size:0.78rem;padding:0.45rem 0.8rem;" href="{{ url_for('connexion') }}">Se connecter pour réserver</a>
         {% endif %}
       </div>
     </div>
