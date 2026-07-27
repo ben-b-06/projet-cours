@@ -40,6 +40,7 @@
         {% if c['reserved_by'] %}
           <span class="badge-enrolled">Réservé par {{ c['student_name'] }}</span>
           <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('messagerie_conversation', contact_id=c['reserved_by']) }}">Écrire à l'élève</a>
+          <a class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('visio', course_id=c['id']) }}">🎥 Visioconférence</a>
         {% else %}
           <span class="mono" style="font-size:0.78rem;color:var(--text-muted);">Disponible</span>
         {% endif %}
