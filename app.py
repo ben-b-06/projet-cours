@@ -9,12 +9,13 @@ Puis ouvrir http://127.0.0.1:5000
 """
 
 import os
+import json
 import calendar as calendar_mod
 from datetime import date
 from functools import wraps
 import sqlite3
 
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,6 +102,18 @@ def init_db():
             body TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             read_at TEXT
+        );
+
+        -- Petits messages techniques (offres/réponses SDP, candidats ICE) échangés
+        -- entre les deux participants d'un appel vidéo, relus par polling.
+        CREATE TABLE IF NOT EXISTS signals(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+            sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
         """
     )
@@ -684,6 +697,67 @@ def admin_supprimer_cours(course_id):
     return redirect(url_for("admin_dashboard"))
 
 
+@app.route("/admin/messagerie")
+@login_required(role="admin")
+def admin_messagerie():
+    db = get_db()
+    conversations = db.execute(
+        """
+        SELECT ct.student_id, ct.teacher_id,
+               s.name AS student_name, t.name AS teacher_name,
+               (
+                   SELECT COUNT(*) FROM messages m
+                   WHERE (m.sender_id = ct.student_id AND m.recipient_id = ct.teacher_id)
+                      OR (m.sender_id = ct.teacher_id AND m.recipient_id = ct.student_id)
+               ) AS message_count,
+               (
+                   SELECT MAX(m.created_at) FROM messages m
+                   WHERE (m.sender_id = ct.student_id AND m.recipient_id = ct.teacher_id)
+                      OR (m.sender_id = ct.teacher_id AND m.recipient_id = ct.student_id)
+               ) AS last_at,
+               (
+                   SELECT m.body FROM messages m
+                   WHERE (m.sender_id = ct.student_id AND m.recipient_id = ct.teacher_id)
+                      OR (m.sender_id = ct.teacher_id AND m.recipient_id = ct.student_id)
+                   ORDER BY m.id DESC LIMIT 1
+               ) AS last_body
+        FROM contacts ct
+        JOIN users s ON s.id = ct.student_id
+        JOIN users t ON t.id = ct.teacher_id
+        GROUP BY ct.student_id, ct.teacher_id
+        ORDER BY last_at IS NULL, last_at DESC
+        """
+    ).fetchall()
+    return render_template("admin_messagerie.html", conversations=conversations)
+
+
+@app.route("/admin/messagerie/<int:student_id>/<int:teacher_id>")
+@login_required(role="admin")
+def admin_messagerie_thread(student_id, teacher_id):
+    db = get_db()
+    contact = db.execute(
+        "SELECT * FROM contacts WHERE student_id = ? AND teacher_id = ?",
+        (student_id, teacher_id),
+    ).fetchone()
+    if not contact:
+        flash("Cette conversation n'existe pas.", "error")
+        return redirect(url_for("admin_messagerie"))
+
+    student = db.execute("SELECT * FROM users WHERE id = ?", (student_id,)).fetchone()
+    teacher = db.execute("SELECT * FROM users WHERE id = ?", (teacher_id,)).fetchone()
+    thread = db.execute(
+        """
+        SELECT * FROM messages
+        WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+        ORDER BY id ASC
+        """,
+        (student_id, teacher_id, teacher_id, student_id),
+    ).fetchall()
+    return render_template(
+        "admin_messagerie_thread.html", student=student, teacher=teacher, thread=thread
+    )
+
+
 # ---------------------------------------------------------------------------
 # Routes — Étudiant
 # ---------------------------------------------------------------------------
@@ -955,6 +1029,95 @@ def messagerie_conversation(contact_id):
     contacts = get_contacts(user)
     return render_template(
         "messagerie.html", contacts=contacts, active_contact=contact, thread=thread
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes — Visioconférence
+# ---------------------------------------------------------------------------
+def get_course_and_partner(course_id, user):
+    """Vérifie que l'utilisateur a le droit d'accéder à la visio de ce cours
+    (le prof qui l'a créé, ou l'élève qui l'a réservé) et renvoie
+    (cours, id_du_correspondant) ou (None, None) si l'accès est refusé."""
+    db = get_db()
+    course = db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone()
+    if not course:
+        return None, None
+    if user["role"] == "prof" and course["teacher_id"] == user["id"]:
+        return course, course["reserved_by"]
+    if user["role"] == "etudiant" and course["reserved_by"] == user["id"]:
+        return course, course["teacher_id"]
+    return None, None
+
+
+@app.route("/cours/<int:course_id>/visio")
+@login_required()
+def visio(course_id):
+    user = current_user()
+    if user["role"] not in ("prof", "etudiant"):
+        flash("La visioconférence est réservée aux professeurs et aux élèves.", "error")
+        return redirect(dashboard_url_for(user["role"]))
+
+    course, partner_id = get_course_and_partner(course_id, user)
+    if not course:
+        flash("Vous n'avez pas accès à la visioconférence de ce cours.", "error")
+        return redirect(dashboard_url_for(user["role"]))
+    if not partner_id:
+        flash("Ce cours doit d'abord être réservé par un élève pour démarrer la visioconférence.", "error")
+        return redirect(dashboard_url_for(user["role"]))
+
+    partner = get_db().execute("SELECT * FROM users WHERE id = ?", (partner_id,)).fetchone()
+    return render_template("visio.html", course=course, partner=partner)
+
+
+@app.route("/cours/<int:course_id>/visio/envoyer", methods=["POST"])
+@login_required()
+def visio_envoyer(course_id):
+    user = current_user()
+    course, partner_id = get_course_and_partner(course_id, user)
+    if not course or not partner_id:
+        return jsonify({"error": "accès refusé"}), 403
+
+    data = request.get_json(silent=True) or {}
+    signal_type = data.get("type")
+    payload = data.get("payload")
+    if signal_type not in ("offer", "answer", "candidate", "leave") or payload is None:
+        return jsonify({"error": "signal invalide"}), 400
+
+    db = get_db()
+    db.execute(
+        "INSERT INTO signals(course_id, sender_id, recipient_id, type, payload) VALUES (?, ?, ?, ?, ?)",
+        (course_id, user["id"], partner_id, signal_type, json.dumps(payload)),
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/cours/<int:course_id>/visio/recevoir")
+@login_required()
+def visio_recevoir(course_id):
+    user = current_user()
+    course, partner_id = get_course_and_partner(course_id, user)
+    if not course or not partner_id:
+        return jsonify({"error": "accès refusé"}), 403
+
+    since = request.args.get("since", 0, type=int)
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT * FROM signals
+        WHERE course_id = ? AND recipient_id = ? AND id > ?
+        ORDER BY id ASC
+        """,
+        (course_id, user["id"], since),
+    ).fetchall()
+    return jsonify(
+        {
+            "signals": [
+                {"id": r["id"], "type": r["type"], "payload": json.loads(r["payload"])}
+                for r in rows
+            ]
+        }
     )
 
 
