@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+  <span class="eyebrow">Administration / Messagerie</span>
+  <div class="row-between" style="margin-bottom:1rem;">
+    <h2 style="font-size:1.4rem;margin:0;">{{ student['name'] }} ↔ {{ teacher['name'] }}</h2>
+    <a class="btn btn-outline" href="{{ url_for('admin_messagerie') }}">← Toutes les conversations</a>
+  </div>
+  <p style="color:var(--text-muted);font-size:0.85rem;margin:0 0 1.2rem;">
+    Vue administrateur en lecture seule — vous ne pouvez pas envoyer de message dans cette conversation.
+  </p>
+
+  <div class="msg-thread card" style="max-width:640px;">
+    <div class="msg-thread-header">{{ student['name'] }} ↔ {{ teacher['name'] }}</div>
+    <div class="msg-bubbles">
+      {% if thread %}
+        {% for m in thread %}
+          <div class="msg-bubble {{ 'mine' if m['sender_id'] == teacher['id'] else 'theirs' }}">
+            <p>{{ m['body'] }}</p>
+            <span class="msg-time">{{ 'Élève' if m['sender_id'] == student['id'] else 'Professeur' }} · {{ m['created_at'] }}</span>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="slot-empty">Aucun message échangé pour l'instant.</p>
+      {% endif %}
+    </div>
+  </div>
+{% endblock %}
