@@ -123,6 +123,20 @@ def init_db():
             payload TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Note laissée par un élève sur un professeur avec qui un cours a été
+        -- réservé. Un élève ne peut laisser qu'une seule note par prof (elle est
+        -- mise à jour s'il note à nouveau). Seule la moyenne est visible par le
+        -- prof concerné : le détail des notes individuelles ne lui est jamais montré.
+        CREATE TABLE IF NOT EXISTS ratings(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+            comment TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(student_id, teacher_id)
+        );
         """
     )
 
@@ -301,6 +315,25 @@ def get_slots_map(db, course_ids):
     return slots_map
 
 
+def get_teacher_ratings_map(db, teacher_ids):
+    """Retourne {teacher_id: {"avg": moyenne, "count": nb_notes}} pour une liste
+    d'ids de profs. Ne renvoie jamais le détail des notes individuelles."""
+    teacher_ids = [tid for tid in {t for t in teacher_ids if t is not None}]
+    if not teacher_ids:
+        return {}
+    placeholders = ",".join("?" for _ in teacher_ids)
+    rows = db.execute(
+        f"""
+        SELECT teacher_id, AVG(rating) AS avg_rating, COUNT(*) AS nb_ratings
+        FROM ratings
+        WHERE teacher_id IN ({placeholders})
+        GROUP BY teacher_id
+        """,
+        teacher_ids,
+    ).fetchall()
+    return {r["teacher_id"]: {"avg": r["avg_rating"], "count": r["nb_ratings"]} for r in rows}
+
+
 @app.template_filter("duree_lisible")
 def duree_lisible(minutes):
     minutes = int(minutes)
@@ -406,6 +439,7 @@ def cours():
     subject = request.args.get("subject", "").strip()
     level = request.args.get("level", "").strip()
     teacher_id = request.args.get("teacher_id", "").strip()
+    min_rating = request.args.get("min_rating", "").strip()
 
     # On ne liste que les cours ayant au moins un créneau encore libre : la
     # réservation se fait désormais créneau par créneau, pas cours entier.
@@ -429,6 +463,13 @@ def cours():
         conditions.append("c.teacher_id = ?")
         params.append(int(teacher_id))
 
+    if min_rating.isdigit() and 1 <= int(min_rating) <= 5:
+        # Un prof sans aucune note (AVG = NULL) n'est jamais retenu par ce filtre.
+        conditions.append(
+            "(SELECT AVG(rating) FROM ratings r WHERE r.teacher_id = c.teacher_id) >= ?"
+        )
+        params.append(int(min_rating))
+
     where_clause = " AND ".join(conditions) if conditions else "1=1"
     rows = db.execute(
         f"""
@@ -446,14 +487,16 @@ def cours():
     ).fetchall()
 
     slots_map = get_slots_map(db, [r["id"] for r in rows])
+    ratings_map = get_teacher_ratings_map(db, [r["teacher_id"] for r in rows])
     return render_template(
         "cours.html",
         courses=rows,
         slots_map=slots_map,
+        ratings_map=ratings_map,
         matieres=MATIERES,
         niveaux=NIVEAUX,
         teachers=teachers,
-        filters={"q": q, "subject": subject, "level": level, "teacher_id": teacher_id},
+        filters={"q": q, "subject": subject, "level": level, "teacher_id": teacher_id, "min_rating": min_rating},
     )
 
 
@@ -611,8 +654,15 @@ def prof_dashboard():
     ).fetchall()
     slots_map = get_slots_map(db, [r["id"] for r in rows])
     reserved_count = sum(1 for slots in slots_map.values() for s in slots if s["reserved_by"])
+    # Le prof ne voit que sa moyenne et le nombre de notes reçues, jamais le
+    # détail des notes individuelles laissées par ses élèves.
+    my_rating = get_teacher_ratings_map(db, [user["id"]]).get(user["id"])
     return render_template(
-        "prof_dashboard.html", courses=rows, reserved_count=reserved_count, slots_map=slots_map
+        "prof_dashboard.html",
+        courses=rows,
+        reserved_count=reserved_count,
+        slots_map=slots_map,
+        my_rating=my_rating,
     )
 
 
@@ -891,7 +941,53 @@ def etudiant():
         """,
         (current_user()["id"],),
     ).fetchall()
-    return render_template("etudiant.html", reservations=reservations)
+    my_ratings = {
+        r["teacher_id"]: r["rating"]
+        for r in db.execute(
+            "SELECT teacher_id, rating FROM ratings WHERE student_id = ?",
+            (current_user()["id"],),
+        ).fetchall()
+    }
+    return render_template("etudiant.html", reservations=reservations, my_ratings=my_ratings)
+
+
+@app.route("/profs/<int:teacher_id>/noter", methods=["POST"])
+@login_required(role="etudiant")
+def noter_prof(teacher_id):
+    user = current_user()
+    db = get_db()
+    teacher = db.execute(
+        "SELECT * FROM users WHERE id = ? AND role = 'prof'", (teacher_id,)
+    ).fetchone()
+    if not teacher:
+        flash("Professeur introuvable.", "error")
+        return redirect(url_for("etudiant"))
+
+    # On ne peut noter qu'un prof avec qui un cours a déjà été réservé.
+    if not is_allowed_contact(user, teacher_id):
+        flash("Vous ne pouvez noter qu'un professeur avec qui vous avez réservé un cours.", "error")
+        return redirect(url_for("etudiant"))
+
+    try:
+        rating = int(request.form.get("rating", ""))
+    except (TypeError, ValueError):
+        rating = 0
+    if rating < 1 or rating > 5:
+        flash("Merci de choisir une note entre 1 et 5 étoiles.", "error")
+        return redirect(url_for("etudiant"))
+
+    db.execute(
+        """
+        INSERT INTO ratings(student_id, teacher_id, rating)
+        VALUES (?, ?, ?)
+        ON CONFLICT(student_id, teacher_id)
+        DO UPDATE SET rating = excluded.rating, created_at = CURRENT_TIMESTAMP
+        """,
+        (user["id"], teacher_id, rating),
+    )
+    db.commit()
+    flash(f"Vous avez noté {teacher['name']} {rating}/5. Merci !", "success")
+    return redirect(url_for("etudiant"))
 
 
 # ---------------------------------------------------------------------------
