@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% block content %}
+  <span class="eyebrow">Visioconférence</span>
+  <div class="row-between" style="margin-bottom:0.6rem;">
+    <h2 style="font-size:1.4rem;margin:0;">{{ course['title'] }}</h2>
+  </div>
+  <p style="color:var(--text-muted);font-size:0.9rem;margin:0 0 1.4rem;">
+    Appel avec <strong>{{ partner['name'] }}</strong>. Autorisez l'accès à votre caméra et votre micro pour commencer.
+  </p>
+
+  <div class="visio-status" id="visioStatus">En attente de démarrage…</div>
+
+  <div class="visio-grid">
+    <div class="visio-video-wrap">
+      <video id="remoteVideo" autoplay playsinline></video>
+      <span class="visio-video-label">{{ partner['name'] }}</span>
+    </div>
+    <div class="visio-video-wrap visio-video-wrap-local">
+      <video id="localVideo" autoplay playsinline muted></video>
+      <span class="visio-video-label">Vous</span>
+    </div>
+  </div>
+
+  <div class="visio-controls">
+    <button class="btn btn-gold" id="startBtn">Démarrer l'appel</button>
+    <button class="btn btn-danger-outline" id="leaveBtn" style="display:none;">Quitter l'appel</button>
+    <button class="btn btn-outline" id="muteBtn" style="display:none;">Couper le micro</button>
+    <button class="btn btn-outline" id="camBtn" style="display:none;">Couper la caméra</button>
+  </div>
+
+  <script>
+    const courseId = {{ course['id'] }};
+    const sendUrl = "{{ url_for('visio_envoyer', course_id=course['id']) }}";
+    const pollUrl = "{{ url_for('visio_recevoir', course_id=course['id']) }}";
+
+    const statusEl = document.getElementById('visioStatus');
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const startBtn = document.getElementById('startBtn');
+    const leaveBtn = document.getElementById('leaveBtn');
+    const muteBtn = document.getElementById('muteBtn');
+    const camBtn = document.getElementById('camBtn');
+
+    let pc = null;
+    let localStream = null;
+    let lastSignalId = 0;
+    let pollTimer = null;
+    let inCall = false;
+
+    function setStatus(text) { statusEl.textContent = text; }
+
+    async function sendSignal(type, payload) {
+      await fetch(sendUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ type, payload }),
+      });
+    }
+
+    function createPeerConnection() {
+      const conn = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      });
+      conn.onicecandidate = (event) => {
+        if (event.candidate) sendSignal('candidate', event.candidate);
+      };
+      conn.ontrack = (event) => {
+        remoteVideo.srcObject = event.streams[0];
+        setStatus('En communication avec {{ partner["name"] }}.');
+      };
+      conn.onconnectionstatechange = () => {
+        if (['disconnected', 'failed', 'closed'].includes(conn.connectionState) && inCall) {
+          setStatus("La connexion a été interrompue.");
+        }
+      };
+      return conn;
+    }
+
+    async function ensureLocalStream() {
+      if (localStream) return localStream;
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localVideo.srcObject = localStream;
+      return localStream;
+    }
+
+    async function startCall() {
+      startBtn.disabled = true;
+      setStatus('Ouverture de la caméra…');
+      try {
+        await ensureLocalStream();
+      } catch (err) {
+        setStatus("Impossible d'accéder à la caméra/micro : " + err.message);
+        startBtn.disabled = false;
+        return;
+      }
+      pc = createPeerConnection();
+      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      await sendSignal('offer', offer);
+
+      inCall = true;
+      startBtn.style.display = 'none';
+      leaveBtn.style.display = 'inline-flex';
+      muteBtn.style.display = 'inline-flex';
+      camBtn.style.display = 'inline-flex';
+      setStatus("Appel lancé, en attente de {{ partner['name'] }}…");
+    }
+
+    async function handleOffer(offer) {
+      setStatus('Ouverture de la caméra…');
+      try {
+        await ensureLocalStream();
+      } catch (err) {
+        setStatus("Impossible d'accéder à la caméra/micro : " + err.message);
+        return;
+      }
+      pc = createPeerConnection();
+      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await sendSignal('answer', answer);
+
+      inCall = true;
+      startBtn.style.display = 'none';
+      leaveBtn.style.display = 'inline-flex';
+      muteBtn.style.display = 'inline-flex';
+      camBtn.style.display = 'inline-flex';
+      setStatus('Connexion en cours…');
+    }
+
+    function endCall(notifyPeer) {
+      if (notifyPeer && inCall) sendSignal('leave', {});
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      if (localStream) {
+        localStream.getTracks().forEach((t) => t.stop());
+        localStream = null;
+      }
+      localVideo.srcObject = null;
+      remoteVideo.srcObject = null;
+      inCall = false;
+      startBtn.disabled = false;
+      startBtn.style.display = 'inline-flex';
+      leaveBtn.style.display = 'none';
+      muteBtn.style.display = 'none';
+      camBtn.style.display = 'none';
+      setStatus('Appel terminé.');
+    }
+
+    async function poll() {
+      try {
+        const res = await fetch(`${pollUrl}?since=${lastSignalId}`, { credentials: 'same-origin' });
+        const data = await res.json();
+        for (const sig of (data.signals || [])) {
+          lastSignalId = Math.max(lastSignalId, sig.id);
+          if (sig.type === 'offer' && !inCall) {
+            await handleOffer(sig.payload);
+          } else if (sig.type === 'answer' && pc) {
+            await pc.setRemoteDescription(new RTCSessionDescription(sig.payload));
+          } else if (sig.type === 'candidate' && pc) {
+            try { await pc.addIceCandidate(sig.payload); } catch (e) { /* ignore */ }
+          } else if (sig.type === 'leave') {
+            endCall(false);
+            setStatus("{{ partner['name'] }} a quitté l'appel.");
+          }
+        }
+      } catch (e) { /* silencieux : on réessaiera au prochain tick */ }
+    }
+
+    pollTimer = setInterval(poll, 1500);
+
+    startBtn.addEventListener('click', startCall);
+    leaveBtn.addEventListener('click', () => endCall(true));
+    window.addEventListener('beforeunload', () => { if (inCall) sendSignal('leave', {}); });
+
+    muteBtn.addEventListener('click', () => {
+      if (!localStream) return;
+      const track = localStream.getAudioTracks()[0];
+      if (!track) return;
+      track.enabled = !track.enabled;
+      muteBtn.textContent = track.enabled ? 'Couper le micro' : 'Réactiver le micro';
+    });
+
+    camBtn.addEventListener('click', () => {
+      if (!localStream) return;
+      const track = localStream.getVideoTracks()[0];
+      if (!track) return;
+      track.enabled = !track.enabled;
+      camBtn.textContent = track.enabled ? 'Couper la caméra' : 'Réactiver la caméra';
+    });
+  </script>
+{% endblock %}
