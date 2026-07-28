@@ -16,12 +16,14 @@ from datetime import date
 from functools import wraps
 import sqlite3
 
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "coursconnect.db")
-PROFILE_PHOTOS_DIR = os.path.join(BASE_DIR, "static", "uploads", "profils")
+DATA_DIR = "/var/data"
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "coursconnect.db")
+PROFILE_PHOTOS_DIR = os.path.join(DATA_DIR, "uploads", "profils")
 ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 
 app = Flask(__name__)
@@ -29,7 +31,7 @@ app.secret_key = "dev-secret-key-change-me"  # à remplacer par une vraie valeur
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo max pour les photos de profil
 
 # Choix fermés pour la matière et le niveau scolaire (du collège au lycée)
-MATIERES = ["Mathématiques", "Physique-Chimie", "Français", "SVT", "SES", "Histoire-Géographie","info","philosophie"]
+MATIERES = ["Mathématiques", "Physique-Chimie", "Français", "SVT", "SES", "Histoire-Géographie"]
 NIVEAUX = ["6e", "5e", "4e", "3e", "2nde", "1re", "Terminale"]
 
 # Modalité d'un cours : uniquement en ligne, uniquement en présentiel, ou les deux
@@ -443,6 +445,10 @@ def login_required(role=None):
 # ---------------------------------------------------------------------------
 # Routes — Accueil
 # ---------------------------------------------------------------------------
+@app.route("/uploads/profils/<filename>")
+def uploaded_profile(filename):
+    return send_from_directory(PROFILE_PHOTOS_DIR, filename)
+
 @app.route("/")
 def index():
     return redirect(url_for("presentation"))
