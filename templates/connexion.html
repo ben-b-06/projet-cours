@@ -1,40 +1,21 @@
 {% extends "base.html" %}
-
 {% block content %}
-<span class="eyebrow">Authentification / Connexion</span>
-
-<div class="card form-card">
+  <span class="eyebrow">Authentification / Connexion</span>
+  <div class="card form-card">
     <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Se connecter</h2>
-
     <form method="post">
-        <div class="field">
-            <label for="email">Adresse e-mail</label>
-            <input
-                id="email"
-                type="email"
-                name="email"
-                required
-                placeholder="vous@exemple.fr">
-        </div>
-
-        <div class="field">
-            <label for="password">Mot de passe</label>
-            <input
-                id="password"
-                type="password"
-                name="password"
-                required
-                placeholder="••••••••">
-        </div>
-
-        <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;">
-            Se connecter
-        </button>
+      <div class="field">
+        <label>Adresse e-mail</label>
+        <input type="email" name="email" required placeholder="vous@exemple.fr">
+      </div>
+      <div class="field">
+        <label>Mot de passe</label>
+        <input type="password" name="password" required placeholder="••••••••">
+      </div>
+      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;">Se connecter</button>
     </form>
+    <a class="helper-link" href="{{ url_for('inscription') }}">Pas encore de compte ? Créer un compte</a>
 
-    <a class="helper-link" href="{{ url_for('inscription') }}">
-        Pas encore de compte ? Créer un compte
-    </a>
-</div>
 
+  </div>
 {% endblock %}
