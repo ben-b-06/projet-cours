@@ -29,7 +29,7 @@ app.secret_key = "dev-secret-key-change-me"  # à remplacer par une vraie valeur
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo max pour les photos de profil
 
 # Choix fermés pour la matière et le niveau scolaire (du collège au lycée)
-MATIERES = ["Mathématiques", "Physique-Chimie", "Français", "SVT", "SES", "Histoire-Géographie","philosophie","info/python"]
+MATIERES = ["Mathématiques", "Physique-Chimie", "Français", "SVT", "SES", "Histoire-Géographie","info","philosophie"]
 NIVEAUX = ["6e", "5e", "4e", "3e", "2nde", "1re", "Terminale"]
 
 # Modalité d'un cours : uniquement en ligne, uniquement en présentiel, ou les deux
@@ -73,7 +73,8 @@ def init_db():
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL CHECK(role IN ('admin', 'prof', 'etudiant')),
             bio TEXT,
-            photo TEXT
+            photo TEXT,
+            approved INTEGER NOT NULL DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS courses(
@@ -156,6 +157,11 @@ def init_db():
         db.execute("ALTER TABLE users ADD COLUMN bio TEXT")
     if "photo" not in user_columns:
         db.execute("ALTER TABLE users ADD COLUMN photo TEXT")
+    if "approved" not in user_columns:
+        # Les comptes déjà existants (créés avant l'ajout de la validation admin)
+        # restent approuvés automatiquement, seuls les nouveaux profs inscrits
+        # après cette migration devront être validés par l'administrateur.
+        db.execute("ALTER TABLE users ADD COLUMN approved INTEGER NOT NULL DEFAULT 1")
 
     slot_columns = [row[1] for row in db.execute("PRAGMA table_info(slots)").fetchall()]
     if "reserved_by" not in slot_columns:
@@ -462,7 +468,12 @@ def cours():
 
     # On ne liste que les cours ayant au moins un créneau encore libre : la
     # réservation se fait désormais créneau par créneau, pas cours entier.
-    conditions = ["EXISTS (SELECT 1 FROM slots s WHERE s.course_id = c.id AND s.reserved_by IS NULL)"]
+    conditions = [
+        "EXISTS (SELECT 1 FROM slots s WHERE s.course_id = c.id AND s.reserved_by IS NULL)",
+        # Les cours d'un prof pas encore validé par l'administrateur ne sont
+        # jamais affichés publiquement.
+        "u.approved = 1",
+    ]
     params = []
 
     if q:
@@ -511,7 +522,7 @@ def cours():
     ).fetchall()
 
     teachers = db.execute(
-        "SELECT id, name FROM users WHERE role = 'prof' ORDER BY name"
+        "SELECT id, name FROM users WHERE role = 'prof' AND approved = 1 ORDER BY name"
     ).fetchall()
 
     slots_map = get_slots_map(db, [r["id"] for r in rows])
@@ -666,13 +677,24 @@ def inscription():
             flash("Un compte existe déjà avec cet e-mail.", "error")
             return render_template("inscription.html")
 
+        # Un professeur qui s'inscrit doit être validé par l'administrateur
+        # avant que son profil et ses cours n'apparaissent publiquement.
+        approved = 0 if role == "prof" else 1
+
         cur = db.execute(
-            "INSERT INTO users(name, email, password_hash, role) VALUES (?, ?, ?, ?)",
-            (name, email, generate_password_hash(password), role),
+            "INSERT INTO users(name, email, password_hash, role, approved) VALUES (?, ?, ?, ?, ?)",
+            (name, email, generate_password_hash(password), role, approved),
         )
         db.commit()
         session["user_id"] = cur.lastrowid
-        flash(f"Compte créé. Bienvenue, {name} !", "success")
+        if role == "prof":
+            flash(
+                f"Compte créé, bienvenue {name} ! Votre profil est en attente de validation par "
+                "l'administrateur : il ne sera visible publiquement qu'une fois validé.",
+                "success",
+            )
+        else:
+            flash(f"Compte créé. Bienvenue, {name} !", "success")
         return redirect(dashboard_url_for(role))
     return render_template("inscription.html")
 
@@ -749,6 +771,14 @@ def prof_profil():
 @app.route("/prof/creer", methods=["GET", "POST"])
 @login_required(role="prof")
 def prof_creer():
+    if not current_user()["approved"]:
+        flash(
+            "Votre compte est en attente de validation par l'administrateur : vous pourrez "
+            "publier des cours une fois votre profil validé.",
+            "error",
+        )
+        return redirect(url_for("prof_dashboard"))
+
     if request.method == "POST":
         title = request.form.get("title", "").strip()
         subject = request.form.get("subject", "")
@@ -853,7 +883,13 @@ def admin_dashboard():
     profs = db.execute(
         """
         SELECT u.*, (SELECT COUNT(*) FROM courses c WHERE c.teacher_id = u.id) AS course_count
-        FROM users u WHERE u.role = 'prof' ORDER BY u.name
+        FROM users u WHERE u.role = 'prof' AND u.approved = 1 ORDER BY u.name
+        """
+    ).fetchall()
+    profs_en_attente = db.execute(
+        """
+        SELECT u.*, (SELECT COUNT(*) FROM courses c WHERE c.teacher_id = u.id) AS course_count
+        FROM users u WHERE u.role = 'prof' AND u.approved = 0 ORDER BY u.name
         """
     ).fetchall()
     etudiants = db.execute(
@@ -873,10 +909,28 @@ def admin_dashboard():
     return render_template(
         "admin_dashboard.html",
         profs=profs,
+        profs_en_attente=profs_en_attente,
         etudiants=etudiants,
         courses=courses_rows,
         slots_map=get_slots_map(db, [c["id"] for c in courses_rows]),
     )
+
+
+@app.route("/admin/utilisateurs/<int:user_id>/valider", methods=["POST"])
+@login_required(role="admin")
+def admin_valider_prof(user_id):
+    """Valide l'inscription d'un professeur : son profil et ses cours
+    deviennent alors visibles publiquement."""
+    db = get_db()
+    target = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not target or target["role"] != "prof":
+        flash("Professeur introuvable.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    db.execute("UPDATE users SET approved = 1 WHERE id = ?", (user_id,))
+    db.commit()
+    flash(f"Le profil de {target['name']} est validé et désormais visible publiquement.", "success")
+    return redirect(url_for("admin_dashboard"))
 
 
 @app.route("/admin/utilisateurs/<int:user_id>/supprimer", methods=["POST"])
