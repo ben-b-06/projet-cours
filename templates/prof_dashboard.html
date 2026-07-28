@@ -2,6 +2,15 @@
 {% import "_macros.html" as macros %}
 {% block content %}
   <span class="eyebrow">Professeur / Tableau de bord</span>
+
+  {% if not current_user['approved'] %}
+  <div class="empty-state" style="border:1px solid var(--gold, #c9a227);margin-bottom:1.4rem;text-align:left;">
+    ⏳ Votre compte est en attente de validation par l'administrateur. Votre profil et vos cours
+    ne seront visibles publiquement, et la création de cours ne sera possible, qu'une fois votre
+    profil validé.
+  </div>
+  {% endif %}
+
   <div class="row-between" style="margin-bottom:1.6rem;">
     <div style="display:flex;align-items:center;gap:0.7rem;">
       {{ macros.avatar(current_user['name'], current_user['photo'], 44) }}
