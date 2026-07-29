@@ -1277,11 +1277,48 @@ def prof_calendrier():
 # ---------------------------------------------------------------------------
 # Routes — Messagerie
 # ---------------------------------------------------------------------------
-def get_contacts(user):
-    """Retourne la liste des correspondants autorisés (profs pour un élève,
-    élèves pour un prof), avec le nombre de messages non lus et un aperçu
-    du dernier message échangé."""
+def get_admin_id():
+    """Renvoie l'id du compte administrateur unique."""
+    row = get_db().execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
+    return row["id"] if row else None
+
+
+def get_contact_preview(user_id, other_id):
+    """Dernier message échangé et nombre de messages non lus entre deux comptes."""
     db = get_db()
+    last = db.execute(
+        """
+        SELECT body, created_at, sender_id FROM messages
+        WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+        ORDER BY id DESC LIMIT 1
+        """,
+        (user_id, other_id, other_id, user_id),
+    ).fetchone()
+    unread = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
+        (other_id, user_id),
+    ).fetchone()[0]
+    return last, unread
+
+
+def get_contacts(user):
+    """Retourne la liste des correspondants autorisés : profs pour un élève,
+    élèves pour un prof, tous les profs/élèves pour l'administrateur — avec
+    dans tous les cas le nombre de messages non lus et un aperçu du dernier
+    message échangé. L'administrateur est toujours proposé comme
+    correspondant aux profs et aux élèves, même sans cours réservé ensemble."""
+    db = get_db()
+    if user["role"] == "admin":
+        rows = db.execute(
+            "SELECT id, name, role FROM users WHERE role IN ('prof', 'etudiant') ORDER BY role, name"
+        ).fetchall()
+        contacts = []
+        for r in rows:
+            last, unread = get_contact_preview(user["id"], r["id"])
+            contacts.append({"id": r["id"], "name": r["name"], "role": r["role"], "last": last, "unread": unread})
+        contacts.sort(key=lambda c: (c["last"]["created_at"] if c["last"] else ""), reverse=True)
+        return contacts
+
     if user["role"] == "etudiant":
         rows = db.execute(
             """
@@ -1311,25 +1348,30 @@ def get_contacts(user):
 
     contacts = []
     for r in rows:
-        last = db.execute(
-            """
-            SELECT body, created_at, sender_id FROM messages
-            WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
-            ORDER BY id DESC LIMIT 1
-            """,
-            (user["id"], r["id"], r["id"], user["id"]),
-        ).fetchone()
-        unread = db.execute(
-            "SELECT COUNT(*) FROM messages WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
-            (r["id"], user["id"]),
-        ).fetchone()[0]
+        last, unread = get_contact_preview(user["id"], r["id"])
         contacts.append({"id": r["id"], "name": r["name"], "role": r["role"], "last": last, "unread": unread})
+
+    # L'administrateur est toujours joignable par un prof ou un élève, même
+    # sans mise en relation préalable via un cours.
+    admin_id = get_admin_id()
+    if admin_id:
+        admin_row = db.execute("SELECT name FROM users WHERE id = ?", (admin_id,)).fetchone()
+        last, unread = get_contact_preview(user["id"], admin_id)
+        contacts.append({"id": admin_id, "name": admin_row["name"], "role": "admin", "last": last, "unread": unread})
+
     contacts.sort(key=lambda c: (c["last"]["created_at"] if c["last"] else ""), reverse=True)
     return contacts
 
 
 def is_allowed_contact(user, other_id):
     db = get_db()
+    if user["role"] == "admin":
+        row = db.execute(
+            "SELECT 1 FROM users WHERE id = ? AND role IN ('prof', 'etudiant')", (other_id,)
+        ).fetchone()
+        return row is not None
+    if other_id == get_admin_id():
+        return True
     if user["role"] == "etudiant":
         row = db.execute(
             "SELECT 1 FROM contacts WHERE student_id = ? AND teacher_id = ?",
@@ -1348,7 +1390,7 @@ def is_allowed_contact(user, other_id):
 @app.context_processor
 def inject_unread_total():
     user = current_user()
-    if user and user["role"] in ("prof", "etudiant"):
+    if user and user["role"] in ("prof", "etudiant", "admin"):
         total = get_db().execute(
             "SELECT COUNT(*) FROM messages WHERE recipient_id = ? AND read_at IS NULL",
             (user["id"],),
@@ -1361,20 +1403,38 @@ def inject_unread_total():
 @login_required()
 def messagerie():
     user = current_user()
-    if user["role"] not in ("prof", "etudiant"):
-        flash("La messagerie est réservée aux professeurs et aux élèves.", "error")
-        return redirect(dashboard_url_for(user["role"]))
     contacts = get_contacts(user)
     return render_template("messagerie.html", contacts=contacts)
+
+
+@app.route("/messagerie/diffusion", methods=["POST"])
+@login_required(role="admin")
+def messagerie_diffusion():
+    """Envoie un même message à tous les professeurs et élèves inscrits."""
+    user = current_user()
+    body = request.form.get("body", "").strip()
+    if not body:
+        flash("Écrivez un message avant de l'envoyer.", "error")
+        return redirect(url_for("messagerie"))
+
+    db = get_db()
+    destinataires = db.execute(
+        "SELECT id FROM users WHERE role IN ('prof', 'etudiant')"
+    ).fetchall()
+    for d in destinataires:
+        db.execute(
+            "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
+            (user["id"], d["id"], body),
+        )
+    db.commit()
+    flash(f"Message envoyé à {len(destinataires)} utilisateur(s).", "success")
+    return redirect(url_for("messagerie"))
 
 
 @app.route("/messagerie/<int:contact_id>", methods=["GET", "POST"])
 @login_required()
 def messagerie_conversation(contact_id):
     user = current_user()
-    if user["role"] not in ("prof", "etudiant"):
-        flash("La messagerie est réservée aux professeurs et aux élèves.", "error")
-        return redirect(dashboard_url_for(user["role"]))
 
     db = get_db()
     contact = db.execute("SELECT * FROM users WHERE id = ?", (contact_id,)).fetchone()
@@ -1668,7 +1728,7 @@ def admin_reinitialiser_mot_de_passe(user_id):
     db.commit()
     flash(
         f"Nouveau mot de passe temporaire pour {target['name']} ({target['email']}) : {new_password} "
-        "— transmettez-le lui, il pourra le changer ensuite dans ses Paramètres.",
+        "— transmettez-le-lui, il pourra le changer ensuite dans ses Paramètres.",
         "success",
     )
     return redirect(url_for("admin_dashboard"))
