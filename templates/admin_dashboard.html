@@ -11,6 +11,24 @@
     <div class="card stat-card"><div class="stat-num">{{ courses|length }}</div><div class="stat-label">Cours</div></div>
   </div>
 
+  <div class="section-title" style="margin-bottom:0.8rem;"><h2>Paramètres d'inscription</h2></div>
+  <div class="card" style="padding:1.2rem 1.4rem;margin-bottom:2.2rem;">
+    <p style="color:var(--text-muted);font-size:0.88rem;margin:0 0 1rem;">
+      Choisissez qui peut créer un compte sur la plateforme.
+    </p>
+    <form method="post" action="{{ url_for('admin_definir_mode_inscription') }}" style="display:flex;flex-wrap:wrap;gap:0.7rem;align-items:center;">
+      <label class="slot-pick {{ 'is-mine' if registration_mode == 'profs' else '' }}" style="cursor:pointer;">
+        <input type="radio" name="registration_mode" value="profs" {{ 'checked' if registration_mode == 'profs' else '' }} onchange="this.form.requestSubmit()">
+        Professeurs uniquement
+      </label>
+      <label class="slot-pick {{ 'is-mine' if registration_mode == 'tous' else '' }}" style="cursor:pointer;">
+        <input type="radio" name="registration_mode" value="tous" {{ 'checked' if registration_mode == 'tous' else '' }} onchange="this.form.requestSubmit()">
+        Professeurs et élèves
+      </label>
+      <button class="btn btn-outline" type="submit" style="font-size:0.8rem;">Appliquer</button>
+    </form>
+  </div>
+
   <div class="section-title"><h2>Professeurs en attente de validation</h2></div>
   {% if profs_en_attente %}
   <div class="course-grid">
