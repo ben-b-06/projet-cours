@@ -34,7 +34,7 @@ app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo max pour les photos d
 MATIERES = ["Mathématiques", "Physique-Chimie","SI", "Français", "SVT", "SES", "Histoire-Géographie"]
 NIVEAUX = ["6e", "5e", "4e", "3e", "2nde", "1re", "Terminale"]
 NIVEAUX_ETUDE_PROF = [
-    "Baccalauréat", "prepa MP", "prepa PC", "prepa TSI", "prepa PSI",, "prepa PT",, "prepa MPI", "prepa ECG", "prepa MP","prépa littéraire" ,"Licence (Bac+3)", "Master (Bac+5)",
+    "Baccalauréat", "prepa MP", "prepa PC", "prepa TSI", "prepa PSI", "prepa PT",, "prepa MPI", "prepa ECG", "prepa MP","prépa littéraire" ,"Licence (Bac+3)", "Master (Bac+5)",
     "Doctorat", "École d'ingénieur", "École de commerce", "Autre",
 ]
 
