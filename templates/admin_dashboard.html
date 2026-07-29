@@ -37,6 +37,7 @@
       <span class="course-cat">En attente de validation</span>
       <h3>{{ p['name'] }}</h3>
       <p class="course-desc mono" style="font-size:0.82rem;">{{ p['email'] }}</p>
+      {% if p['education_level'] %}<p class="course-desc mono" style="font-size:0.78rem;color:var(--text-muted);">{{ p['education_level'] }}</p>{% endif %}
       <div class="course-meta">
         <span>{{ p['course_count'] }} cours créé(s)</span>
         <div style="display:flex;gap:0.5rem;">
@@ -64,6 +65,7 @@
     <div class="card course-card">
       <h3>{{ p['name'] }}</h3>
       <p class="course-desc mono" style="font-size:0.82rem;">{{ p['email'] }}</p>
+      {% if p['education_level'] %}<p class="course-desc mono" style="font-size:0.78rem;color:var(--text-muted);">{{ p['education_level'] }}</p>{% endif %}
       <div class="course-meta">
         <span>{{ p['course_count'] }} cours créé(s)</span>
         <div style="display:flex;gap:0.5rem;">
@@ -91,6 +93,7 @@
     <div class="card course-card">
       <h3>{{ s['name'] }}</h3>
       <p class="course-desc mono" style="font-size:0.82rem;">{{ s['email'] }}</p>
+      {% if s['education_level'] %}<p class="course-desc mono" style="font-size:0.78rem;color:var(--text-muted);">Classe : {{ s['education_level'] }}</p>{% endif %}
       <div class="course-meta">
         <span>{{ s['course_count'] }} créneau(x) réservé(s)</span>
         <div style="display:flex;gap:0.5rem;">

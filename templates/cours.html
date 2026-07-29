@@ -90,6 +90,9 @@
         {{ macros.avatar(c['teacher_name'], c['teacher_photo'], 32) }}
         <div>
           <span class="teacher-name">{{ c['teacher_name'] }}</span>
+          {% if c['teacher_education_level'] %}
+            <span class="mono" style="font-size:0.72rem;color:var(--text-muted);display:block;">{{ c['teacher_education_level'] }}</span>
+          {% endif %}
           {% if tr %}
             <span class="teacher-rating" title="{{ tr.count }} note(s)">★ {{ '%.1f'|format(tr.avg) }}<span class="teacher-rating-count"> ({{ tr.count }})</span></span>
           {% else %}

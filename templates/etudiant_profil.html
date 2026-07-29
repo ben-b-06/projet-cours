@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% import "_macros.html" as macros %}
 {% block content %}
-  <span class="eyebrow">Professeur / Mon profil</span>
+  <span class="eyebrow">Élève / Mon profil</span>
   <div class="card form-card wide">
     <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Modifier mon profil</h2>
 
@@ -21,10 +21,10 @@
       </div>
 
       <div class="field">
-        <label>Niveau d'étude</label>
+        <label>Classe</label>
         <select name="education_level">
-          <option value="" {{ 'selected' if not user['education_level'] else '' }}>Non renseigné</option>
-          {% for n in niveaux_etude %}
+          <option value="" {{ 'selected' if not user['education_level'] else '' }}>Non renseignée</option>
+          {% for n in niveaux %}
             <option value="{{ n }}" {{ 'selected' if user['education_level'] == n else '' }}>{{ n }}</option>
           {% endfor %}
         </select>
@@ -32,7 +32,7 @@
 
       <div class="field">
         <label>Description</label>
-        <textarea name="bio" rows="5" placeholder="Présentez-vous aux élèves : votre parcours, vos matières, votre approche pédagogique…">{{ user['bio'] or '' }}</textarea>
+        <textarea name="bio" rows="5" placeholder="Parlez un peu de vous : vos matières préférées, ce que vous cherchez à progresser…">{{ user['bio'] or '' }}</textarea>
       </div>
 
       <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;margin-top:0.6rem;">Enregistrer mon profil</button>
