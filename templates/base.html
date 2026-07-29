@@ -21,8 +21,8 @@
 <span class="tree-group">Accueil</span>
 <ul>
 <li><a class="tree-link {{ 'active' if request.endpoint=='presentation' else '' }}" href="{{ url_for('presentation') }}"><span class="dot"></span>Présentation</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='cours' else '' }}" href="{{ url_for('cours') }}"><span class="dot"></span>Liste des cours</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='cours_calendrier' else '' }}" href="{{ url_for('cours_calendrier') }}"><span class="dot"></span>Calendrier des cours</a></li>
+<li><a class="tree-link {{ 'active' if request.endpoint=='cours' else '' }}" href="{{ url_for('cours') }}"><span class="dot"></span>Cours disponible ( liste )</a></li>
+<li><a class="tree-link {{ 'active' if request.endpoint=='cours_calendrier' else '' }}" href="{{ url_for('cours_calendrier') }}"><span class="dot"></span>Cours disponible ( calendrier )</a></li>
 </ul>
 </li>
 
