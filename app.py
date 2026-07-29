@@ -499,19 +499,24 @@ def presentation():
     return render_template("presentation.html")
 
 
-@app.route("/cours")
-def cours():
-    db = get_db()
-    user = current_user()
+def parse_course_filters(args):
+    """Lit les paramètres de filtre de recherche de cours depuis la querystring
+    (partagé entre la vue liste et la vue calendrier)."""
+    return {
+        "q": args.get("q", "").strip(),
+        "subject": args.get("subject", "").strip(),
+        "level": args.get("level", "").strip(),
+        "teacher_id": args.get("teacher_id", "").strip(),
+        "min_rating": args.get("min_rating", "").strip(),
+        "mode": args.get("mode", "").strip(),
+        "city": args.get("city", "").strip(),
+    }
 
-    q = request.args.get("q", "").strip()
-    subject = request.args.get("subject", "").strip()
-    level = request.args.get("level", "").strip()
-    teacher_id = request.args.get("teacher_id", "").strip()
-    min_rating = request.args.get("min_rating", "").strip()
-    mode = request.args.get("mode", "").strip()
-    city = request.args.get("city", "").strip()
 
+def build_course_query(filters):
+    """Construit la clause WHERE + les paramètres SQL correspondant aux
+    filtres de recherche de cours (partagé entre la vue liste et la vue
+    calendrier)."""
     # On ne liste que les cours ayant au moins un créneau encore libre : la
     # réservation se fait désormais créneau par créneau, pas cours entier.
     conditions = [
@@ -522,40 +527,45 @@ def cours():
     ]
     params = []
 
-    if q:
+    if filters["q"]:
         conditions.append("(c.title LIKE ? OR c.description LIKE ?)")
-        like = f"%{q}%"
+        like = f"%{filters['q']}%"
         params.extend([like, like])
 
-    if subject in MATIERES:
+    if filters["subject"] in MATIERES:
         conditions.append("c.subject = ?")
-        params.append(subject)
+        params.append(filters["subject"])
 
-    if level in NIVEAUX:
+    if filters["level"] in NIVEAUX:
         conditions.append("c.level = ?")
-        params.append(level)
+        params.append(filters["level"])
 
-    if mode == "en_ligne":
+    if filters["mode"] == "en_ligne":
         conditions.append("c.mode IN ('en_ligne', 'les_deux')")
-    elif mode == "presentiel":
+    elif filters["mode"] == "presentiel":
         conditions.append("c.mode IN ('presentiel', 'les_deux')")
 
-    if city:
+    if filters["city"]:
         conditions.append("c.city LIKE ?")
-        params.append(f"%{city}%")
+        params.append(f"%{filters['city']}%")
 
-    if teacher_id.isdigit():
+    if filters["teacher_id"].isdigit():
         conditions.append("c.teacher_id = ?")
-        params.append(int(teacher_id))
+        params.append(int(filters["teacher_id"]))
 
-    if min_rating.isdigit() and 1 <= int(min_rating) <= 5:
+    if filters["min_rating"].isdigit() and 1 <= int(filters["min_rating"]) <= 5:
         # Un prof sans aucune note (AVG = NULL) n'est jamais retenu par ce filtre.
         conditions.append(
             "(SELECT AVG(rating) FROM ratings r WHERE r.teacher_id = c.teacher_id) >= ?"
         )
-        params.append(int(min_rating))
+        params.append(int(filters["min_rating"]))
 
     where_clause = " AND ".join(conditions) if conditions else "1=1"
+    return where_clause, params
+
+
+def fetch_filtered_courses(db, filters):
+    where_clause, params = build_course_query(filters)
     rows = db.execute(
         f"""
         SELECT c.*, u.name AS teacher_name, u.bio AS teacher_bio, u.photo AS teacher_photo,
@@ -567,6 +577,16 @@ def cours():
         """,
         params,
     ).fetchall()
+    return rows
+
+
+@app.route("/cours")
+def cours():
+    db = get_db()
+    user = current_user()
+
+    filters = parse_course_filters(request.args)
+    rows = fetch_filtered_courses(db, filters)
 
     teachers = db.execute(
         "SELECT id, name FROM users WHERE role = 'prof' AND approved = 1 ORDER BY name"
@@ -583,15 +603,64 @@ def cours():
         niveaux=NIVEAUX,
         teachers=teachers,
         mode_labels=MODE_LABELS,
-        filters={
-            "q": q,
-            "subject": subject,
-            "level": level,
-            "teacher_id": teacher_id,
-            "min_rating": min_rating,
-            "mode": mode,
-            "city": city,
-        },
+        filters=filters,
+    )
+
+
+@app.route("/cours/calendrier")
+def cours_calendrier():
+    """Vue calendrier de la recherche de cours : affiche, sur une grille
+    mensuelle, tous les créneaux encore disponibles correspondant aux mêmes
+    filtres que la liste des cours (matière, niveau, modalité, ville,
+    professeur, note minimale, recherche libre)."""
+    db = get_db()
+    filters = parse_course_filters(request.args)
+    year, month = resolve_month(request.args)
+    (prev_year, prev_month), (next_year, next_month) = month_nav(year, month)
+
+    courses = fetch_filtered_courses(db, filters)
+    teachers = db.execute(
+        "SELECT id, name FROM users WHERE role = 'prof' AND approved = 1 ORDER BY name"
+    ).fetchall()
+
+    slots_map = get_slots_map(db, [c["id"] for c in courses])
+
+    events_by_date = {}
+    for c in courses:
+        for s in slots_map.get(c["id"], []):
+            if s["reserved_by"] is not None:
+                continue
+            events_by_date.setdefault(s["slot_date"], []).append(
+                {
+                    "title": c["title"],
+                    "subtitle": f"{c['subject']} · {c['level']} · {c['teacher_name']}",
+                    "time": s["slot_time"],
+                    "duration": s["duration_minutes"],
+                    "status": "disponible",
+                    "course_id": c["id"],
+                }
+            )
+
+    # Chaque case du calendrier trie ses créneaux par heure.
+    for evs in events_by_date.values():
+        evs.sort(key=lambda e: e["time"])
+
+    weeks = build_month_weeks(year, month, events_by_date)
+
+    nav_args = {k: v for k, v in filters.items() if v}
+    return render_template(
+        "cours_calendrier.html",
+        weeks=weeks,
+        month_label=f"{MOIS_FR[month]} {year}",
+        jours=JOURS_FR,
+        prev_link=url_for("cours_calendrier", year=prev_year, month=prev_month, **nav_args),
+        next_link=url_for("cours_calendrier", year=next_year, month=next_month, **nav_args),
+        today_link=url_for("cours_calendrier", **nav_args),
+        matieres=MATIERES,
+        niveaux=NIVEAUX,
+        teachers=teachers,
+        filters=filters,
+        courses_count=len(courses),
     )
 
 
