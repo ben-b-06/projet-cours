@@ -33,6 +33,10 @@ app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo max pour les photos d
 # Choix fermés pour la matière et le niveau scolaire (du collège au lycée)
 MATIERES = ["Mathématiques", "Physique-Chimie","SI", "Français", "SVT", "SES", "Histoire-Géographie"]
 NIVEAUX = ["6e", "5e", "4e", "3e", "2nde", "1re", "Terminale"]
+NIVEAUX_ETUDE_PROF = [
+    "Baccalauréat", "Bac+2 (BTS/DUT)", "Licence (Bac+3)", "Master (Bac+5)",
+    "Doctorat", "École d'ingénieur", "École de commerce", "Autre",
+]
 
 # Modalité d'un cours : uniquement en ligne, uniquement en présentiel, ou les deux
 # (dans ce dernier cas, l'élève choisit la modalité pour chaque créneau qu'il réserve).
@@ -181,6 +185,10 @@ def init_db():
         # restent approuvés automatiquement, seuls les nouveaux profs inscrits
         # après cette migration devront être validés par l'administrateur.
         db.execute("ALTER TABLE users ADD COLUMN approved INTEGER NOT NULL DEFAULT 1")
+    if "education_level" not in user_columns:
+        # Pour un professeur : son niveau d'étude (ex. Master, Doctorat...).
+        # Pour un élève : sa classe (ex. Terminale, 6e...).
+        db.execute("ALTER TABLE users ADD COLUMN education_level TEXT")
 
     slot_columns = [row[1] for row in db.execute("PRAGMA table_info(slots)").fetchall()]
     if "reserved_by" not in slot_columns:
@@ -550,7 +558,8 @@ def cours():
     where_clause = " AND ".join(conditions) if conditions else "1=1"
     rows = db.execute(
         f"""
-        SELECT c.*, u.name AS teacher_name, u.bio AS teacher_bio, u.photo AS teacher_photo
+        SELECT c.*, u.name AS teacher_name, u.bio AS teacher_bio, u.photo AS teacher_photo,
+               u.education_level AS teacher_education_level
         FROM courses c
         JOIN users u ON u.id = c.teacher_id
         WHERE {where_clause}
@@ -793,13 +802,14 @@ def prof_profil():
 
     if request.method == "POST":
         bio = request.form.get("bio", "").strip()
+        education_level = request.form.get("education_level", "").strip()
         photo_file = request.files.get("photo")
         photo_filename = user["photo"]
 
         if photo_file and photo_file.filename:
             if not allowed_photo(photo_file.filename):
                 flash("Format d'image non pris en charge (utilisez JPG, PNG ou WEBP).", "error")
-                return render_template("prof_profil.html", user=user)
+                return render_template("prof_profil.html", user=user, niveaux_etude=NIVEAUX_ETUDE_PROF)
             ext = photo_file.filename.rsplit(".", 1)[1].lower()
             new_filename = f"prof-{user['id']}.{ext}"
             os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
@@ -807,14 +817,14 @@ def prof_profil():
             photo_filename = new_filename
 
         db.execute(
-            "UPDATE users SET bio = ?, photo = ? WHERE id = ?",
-            (bio or None, photo_filename, user["id"]),
+            "UPDATE users SET bio = ?, photo = ?, education_level = ? WHERE id = ?",
+            (bio or None, photo_filename, education_level or None, user["id"]),
         )
         db.commit()
         flash("Profil mis à jour.", "success")
         return redirect(url_for("prof_profil"))
 
-    return render_template("prof_profil.html", user=user)
+    return render_template("prof_profil.html", user=user, niveaux_etude=NIVEAUX_ETUDE_PROF)
 
 
 @app.route("/prof/creer", methods=["GET", "POST"])
@@ -1100,6 +1110,39 @@ def admin_messagerie_thread(student_id, teacher_id):
 # ---------------------------------------------------------------------------
 # Routes — Étudiant
 # ---------------------------------------------------------------------------
+@app.route("/etudiant/profil", methods=["GET", "POST"])
+@login_required(role="etudiant")
+def etudiant_profil():
+    db = get_db()
+    user = current_user()
+
+    if request.method == "POST":
+        bio = request.form.get("bio", "").strip()
+        classe = request.form.get("education_level", "").strip()
+        photo_file = request.files.get("photo")
+        photo_filename = user["photo"]
+
+        if photo_file and photo_file.filename:
+            if not allowed_photo(photo_file.filename):
+                flash("Format d'image non pris en charge (utilisez JPG, PNG ou WEBP).", "error")
+                return render_template("etudiant_profil.html", user=user, niveaux=NIVEAUX)
+            ext = photo_file.filename.rsplit(".", 1)[1].lower()
+            new_filename = f"etudiant-{user['id']}.{ext}"
+            os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
+            photo_file.save(os.path.join(PROFILE_PHOTOS_DIR, new_filename))
+            photo_filename = new_filename
+
+        db.execute(
+            "UPDATE users SET bio = ?, photo = ?, education_level = ? WHERE id = ?",
+            (bio or None, photo_filename, classe or None, user["id"]),
+        )
+        db.commit()
+        flash("Profil mis à jour.", "success")
+        return redirect(url_for("etudiant_profil"))
+
+    return render_template("etudiant_profil.html", user=user, niveaux=NIVEAUX)
+
+
 @app.route("/etudiant/mes-cours")
 @login_required(role="etudiant")
 def etudiant():
