@@ -3,9 +3,24 @@
   <div class="section-title">
     <div>
       <span class="eyebrow">Messagerie</span>
-      <h2>{{ 'Discuter avec un professeur' if current_user['role'] == 'etudiant' else 'Discuter avec un élève' }}</h2>
+      <h2>
+        {% if current_user['role'] == 'etudiant' %}Discuter avec un professeur
+        {% elif current_user['role'] == 'prof' %}Discuter avec un élève
+        {% else %}Contacter les professeurs et les élèves
+        {% endif %}
+      </h2>
     </div>
   </div>
+
+  {% if current_user['role'] == 'admin' %}
+  <form method="post" action="{{ url_for('messagerie_diffusion') }}" class="card" style="padding:1rem 1.2rem;margin-bottom:1.4rem;display:flex;gap:0.7rem;align-items:flex-end;flex-wrap:wrap;">
+    <div class="field" style="flex:1;min-width:220px;margin-bottom:0;">
+      <label>Message à tout le monde (tous les professeurs et élèves)</label>
+      <textarea name="body" rows="2" placeholder="Écrivez une annonce à diffuser à tous les utilisateurs…" required></textarea>
+    </div>
+    <button class="btn btn-gold" type="submit">Envoyer à tous</button>
+  </form>
+  {% endif %}
 
   <div class="msg-shell">
     <div class="msg-list card">
@@ -14,7 +29,7 @@
         <a class="msg-contact {{ 'active' if active_contact and active_contact['id'] == c['id'] else '' }}"
            href="{{ url_for('messagerie_conversation', contact_id=c['id']) }}">
           <span class="msg-contact-top">
-            <span class="msg-contact-name">{{ c['name'] }}</span>
+            <span class="msg-contact-name">{{ c['name'] }}{% if c['role'] == 'admin' %} (Administrateur){% endif %}</span>
             {% if c['unread'] %}<span class="msg-badge">{{ c['unread'] }}</span>{% endif %}
           </span>
           <span class="msg-contact-preview">
@@ -26,8 +41,10 @@
         <p class="slot-empty" style="padding:1rem;">
           {% if current_user['role'] == 'etudiant' %}
             Réservez un cours avec un professeur pour pouvoir lui écrire.
-          {% else %}
+          {% elif current_user['role'] == 'prof' %}
             Aucun élève ne vous a encore réservé de cours.
+          {% else %}
+            Aucun professeur ni élève inscrit pour le moment.
           {% endif %}
         </p>
       {% endif %}
