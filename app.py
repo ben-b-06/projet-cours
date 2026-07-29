@@ -31,7 +31,7 @@ app.secret_key = "dev-secret-key-change-me"  # à remplacer par une vraie valeur
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo max pour les photos de profil
 
 # Choix fermés pour la matière et le niveau scolaire (du collège au lycée)
-MATIERES = ["Mathématiques", "Physique-Chimie", "Français", "SVT", "SES", "Histoire-Géographie"]
+MATIERES = ["Mathématiques", "Physique-Chimie","SI"," Français", "SVT", "SES", "Histoire-Géographie"]
 NIVEAUX = ["6e", "5e", "4e", "3e", "2nde", "1re", "Terminale"]
 
 # Modalité d'un cours : uniquement en ligne, uniquement en présentiel, ou les deux
