@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="section-title">
+    <div>
+      <span class="eyebrow">Accueil / Calendrier des cours</span>
+      <h2>Calendrier des cours disponibles</h2>
+    </div>
+  </div>
+  <p style="color:var(--text-muted);font-size:0.9rem;margin:-0.6rem 0 1.4rem;">
+    Visualisez sur un mois tous les créneaux encore libres correspondant à vos filtres. Cliquez sur un créneau pour ouvrir la fiche du cours et réserver.
+  </p>
+
+  <div class="row-between" style="margin-bottom:1rem;flex-wrap:wrap;gap:0.6rem;">
+    <div style="display:flex;gap:0.5rem;">
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours', **filters) }}">☰ Liste</a>
+      <a class="btn btn-gold" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours_calendrier', **filters) }}">📅 Calendrier</a>
+    </div>
+  </div>
+
+  <form method="get" action="{{ url_for('cours_calendrier') }}" class="card filter-bar">
+    <div class="field">
+      <label for="q">Recherche</label>
+      <input type="text" id="q" name="q" placeholder="Titre ou description…" value="{{ filters.q }}">
+    </div>
+    <div class="field">
+      <label for="subject">Matière</label>
+      <select id="subject" name="subject">
+        <option value="">Toutes</option>
+        {% for m in matieres %}
+        <option value="{{ m }}" {{ 'selected' if filters.subject == m else '' }}>{{ m }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="level">Niveau</label>
+      <select id="level" name="level">
+        <option value="">Tous</option>
+        {% for n in niveaux %}
+        <option value="{{ n }}" {{ 'selected' if filters.level == n else '' }}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="mode">Modalité</label>
+      <select id="mode" name="mode" onchange="document.getElementById('cityFilterField').style.display = (this.value === 'presentiel') ? '' : 'none';">
+        <option value="">Toutes</option>
+        <option value="en_ligne" {{ 'selected' if filters.mode == 'en_ligne' else '' }}>En ligne</option>
+        <option value="presentiel" {{ 'selected' if filters.mode == 'presentiel' else '' }}>En présentiel</option>
+      </select>
+    </div>
+    <div class="field" id="cityFilterField" style="{{ '' if filters.mode == 'presentiel' else 'display:none;' }}">
+      <label for="city">Ville</label>
+      <input type="text" id="city" name="city" placeholder="Ex. Lyon" value="{{ filters.city }}">
+    </div>
+    <div class="field">
+      <label for="teacher_id">Professeur</label>
+      <select id="teacher_id" name="teacher_id">
+        <option value="">Tous</option>
+        {% for t in teachers %}
+        <option value="{{ t['id'] }}" {{ 'selected' if filters.teacher_id == t['id']|string else '' }}>{{ t['name'] }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="min_rating">Note min. du prof</label>
+      <select id="min_rating" name="min_rating">
+        <option value="">Toutes</option>
+        {% for note in [4, 3, 2, 1] %}
+        <option value="{{ note }}" {{ 'selected' if filters.min_rating == note|string else '' }}>{{ '★' * note }}{{ '☆' * (5 - note) }} et plus</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <button class="btn btn-gold" type="submit">Filtrer</button>
+    </div>
+  </form>
+
+  <div class="row-between" style="margin-bottom:1.4rem;">
+    <h2 style="font-size:1.5rem;margin:0;">{{ month_label }}</h2>
+    <div style="display:flex;gap:0.5rem;">
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ prev_link }}">← Précédent</a>
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ today_link }}">Aujourd'hui</a>
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ next_link }}">Suivant →</a>
+    </div>
+  </div>
+
+  <div class="calendar-legend">
+    <span><i class="legend-dot legend-dispo"></i>Créneau disponible</span>
+  </div>
+
+  {% if courses_count == 0 %}
+  <div class="empty-state">Aucun cours ne correspond à ces filtres.</div>
+  {% endif %}
+
+  <div class="calendar">
+    <div class="calendar-weekdays">
+      {% for j in jours %}
+        <div class="calendar-weekday">{{ j }}</div>
+      {% endfor %}
+    </div>
+    {% for week in weeks %}
+    <div class="calendar-week">
+      {% for day in week %}
+      <div class="calendar-day {{ '' if day.in_month else 'is-outside' }} {{ 'is-today' if day.is_today else '' }}">
+        <span class="calendar-day-num">{{ day.date.day }}</span>
+        {% for ev in day.events %}
+          <a href="{{ url_for('cours', **filters) }}#course-{{ ev.course_id }}"
+             class="calendar-event event-{{ ev.status }}"
+             style="display:block;text-decoration:none;color:inherit;"
+             title="{{ ev.title }} — {{ ev.subtitle }}">
+            <span class="event-time">{{ ev.time }}</span> {{ ev.title }}
+          </a>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+{% endblock %}

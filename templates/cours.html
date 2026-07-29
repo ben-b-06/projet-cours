@@ -11,6 +11,13 @@
     Réservez un ou plusieurs créneaux précis avec le prof de votre choix : chaque créneau réservé n'apparaît plus pour les autres élèves.
   </p>
 
+  <div class="row-between" style="margin-bottom:1rem;flex-wrap:wrap;gap:0.6rem;">
+    <div style="display:flex;gap:0.5rem;">
+      <a class="btn btn-gold" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours', **filters) }}">☰ Liste</a>
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours_calendrier', **filters) }}">📅 Calendrier</a>
+    </div>
+  </div>
+
   <form method="get" action="{{ url_for('cours') }}" class="card filter-bar">
     <div class="field">
       <label for="q">Recherche</label>
@@ -74,7 +81,7 @@
     {% for c in courses %}
     {% set course_slots = slots_map.get(c['id'], []) %}
     {% set free_slots = course_slots|selectattr('reserved_by', 'none')|list %}
-    <div class="card course-card">
+    <div class="card course-card" id="course-{{ c['id'] }}">
       <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
       <h3>{{ c['title'] }}</h3>
       <p class="course-desc">{{ c['description'] }}</p>
