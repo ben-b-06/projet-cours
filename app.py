@@ -31,7 +31,7 @@ app.secret_key = "dev-secret-key-change-me"  # à remplacer par une vraie valeur
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo max pour les photos de profil
 
 # Choix fermés pour la matière et le niveau scolaire (du collège au lycée)
-MATIERES = ["Mathématiques", "Physique-Chimie","SI"," Français", "SVT", "SES", "Histoire-Géographie"]
+MATIERES = ["Mathématiques", "Physique-Chimie","SI", "Français", "SVT", "SES", "Histoire-Géographie"]
 NIVEAUX = ["6e", "5e", "4e", "3e", "2nde", "1re", "Terminale"]
 
 # Modalité d'un cours : uniquement en ligne, uniquement en présentiel, ou les deux
@@ -149,8 +149,25 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(student_id, teacher_id)
         );
+
+        -- Réglages globaux du site (une seule ligne par clé).
+        CREATE TABLE IF NOT EXISTS settings(
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         """
     )
+
+    # Réglage : qui peut s'inscrire sur le site.
+    #   - 'tous'  : professeurs ET élèves peuvent créer un compte (par défaut)
+    #   - 'profs' : seuls les professeurs peuvent s'inscrire
+    existing_setting = db.execute(
+        "SELECT value FROM settings WHERE key = 'registration_mode'"
+    ).fetchone()
+    if not existing_setting:
+        db.execute(
+            "INSERT INTO settings(key, value) VALUES ('registration_mode', 'tous')"
+        )
 
     # Migrations : ajoute les colonnes introduites après la création initiale des
     # tables, pour les bases existantes qui ne les ont pas encore.
@@ -410,6 +427,25 @@ def inject_current_user():
     return {"current_user": current_user()}
 
 
+def get_registration_mode():
+    """Renvoie 'tous' (profs + élèves) ou 'profs' (professeurs uniquement)."""
+    db = get_db()
+    row = db.execute("SELECT value FROM settings WHERE key = 'registration_mode'").fetchone()
+    return row["value"] if row else "tous"
+
+
+def set_registration_mode(mode):
+    if mode not in ("tous", "profs"):
+        return
+    db = get_db()
+    db.execute(
+        "INSERT INTO settings(key, value) VALUES ('registration_mode', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (mode,),
+    )
+    db.commit()
+
+
 def dashboard_url_for(role):
     if role == "admin":
         return url_for("admin_dashboard")
@@ -445,10 +481,6 @@ def login_required(role=None):
 # ---------------------------------------------------------------------------
 # Routes — Accueil
 # ---------------------------------------------------------------------------
-@app.route("/uploads/profils/<filename>")
-def uploaded_profile(filename):
-    return send_from_directory(PROFILE_PHOTOS_DIR, filename)
-
 @app.route("/")
 def index():
     return redirect(url_for("presentation"))
@@ -662,8 +694,15 @@ def connexion_demo(role):
     return redirect(url_for("connexion"))
 
 
+@app.route("/uploads/profils/<filename>")
+def uploaded_profile(filename):
+    return send_from_directory(PROFILE_PHOTOS_DIR, filename)
+
+
 @app.route("/inscription", methods=["GET", "POST"])
 def inscription():
+    registration_mode = get_registration_mode()
+
     if request.method == "POST":
         name = request.form.get("name", "").strip()
         email = request.form.get("email", "").strip().lower()
@@ -672,16 +711,20 @@ def inscription():
 
         if role not in ("prof", "etudiant"):
             flash("Merci de choisir un rôle valide.", "error")
-            return render_template("inscription.html")
+            return render_template("inscription.html", registration_mode=registration_mode)
+
+        if registration_mode == "profs" and role == "etudiant":
+            flash("Les inscriptions sont actuellement réservées aux professeurs.", "error")
+            return render_template("inscription.html", registration_mode=registration_mode)
 
         if not name or not email or len(password) < 4:
             flash("Merci de renseigner un nom, un e-mail et un mot de passe d'au moins 4 caractères.", "error")
-            return render_template("inscription.html")
+            return render_template("inscription.html", registration_mode=registration_mode)
 
         db = get_db()
         if db.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
             flash("Un compte existe déjà avec cet e-mail.", "error")
-            return render_template("inscription.html")
+            return render_template("inscription.html", registration_mode=registration_mode)
 
         # Un professeur qui s'inscrit doit être validé par l'administrateur
         # avant que son profil et ses cours n'apparaissent publiquement.
@@ -702,7 +745,7 @@ def inscription():
         else:
             flash(f"Compte créé. Bienvenue, {name} !", "success")
         return redirect(dashboard_url_for(role))
-    return render_template("inscription.html")
+    return render_template("inscription.html", registration_mode=registration_mode)
 
 
 @app.route("/deconnexion")
@@ -919,7 +962,23 @@ def admin_dashboard():
         etudiants=etudiants,
         courses=courses_rows,
         slots_map=get_slots_map(db, [c["id"] for c in courses_rows]),
+        registration_mode=get_registration_mode(),
     )
+
+
+@app.route("/admin/parametres/inscriptions", methods=["POST"])
+@login_required(role="admin")
+def admin_definir_mode_inscription():
+    mode = request.form.get("registration_mode")
+    if mode not in ("tous", "profs"):
+        flash("Mode d'inscription invalide.", "error")
+        return redirect(url_for("admin_dashboard"))
+    set_registration_mode(mode)
+    if mode == "profs":
+        flash("Les inscriptions sont désormais réservées aux professeurs.", "success")
+    else:
+        flash("Les inscriptions sont désormais ouvertes à tous (professeurs et élèves).", "success")
+    return redirect(url_for("admin_dashboard"))
 
 
 @app.route("/admin/utilisateurs/<int:user_id>/valider", methods=["POST"])
