@@ -64,7 +64,7 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 stripe.api_key = STRIPE_SECRET_KEY
 
 # Montants de recharge proposés à l'élève, en euros.
-WALLET_TOPUP_AMOUNTS = [10, 20, 50, 100]
+WALLET_TOPUP_AMOUNTS = [10,15, 20,25,30]
 
 # Délai laissé à l'élève, après la fin du cours, pour confirmer que tout
 # s'est bien passé ou pour demander un remboursement. Passé ce délai, le
@@ -463,6 +463,8 @@ def get_teacher_ratings_map(db, teacher_ids):
 # ---------------------------------------------------------------------------
 # Portefeuille & séquestre des paiements
 # ---------------------------------------------------------------------------
+
+
 def credit_wallet(db, user_id, amount_cents, kind, description=None, stripe_session_id=None, payment_id=None):
     """Crédite (amount_cents > 0) ou débite (amount_cents < 0) le portefeuille
     d'un utilisateur et journalise le mouvement. Ne fait pas de commit."""
