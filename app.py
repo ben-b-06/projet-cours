@@ -71,6 +71,16 @@ WALLET_TOPUP_AMOUNTS = [10,15, 20,25,30]
 # paiement séquestré est automatiquement versé au professeur.
 PAYMENT_HOLD_DELAY = timedelta(hours=24)
 
+# Pourcentage prélevé par la plateforme (admin) sur chaque paiement versé au
+# professeur (transaction qui s'est déroulée correctement, càd confirmée par
+# l'élève ou libérée automatiquement). Les remboursements ne sont PAS soumis
+# à cette commission, puisque la transaction n'a pas été menée à son terme.
+ADMIN_COMMISSION_RATE = 0.10  # 10 %
+
+# Délai minimum avant le début d'une séance en dessous duquel ni le
+# professeur ni l'élève ne peuvent l'annuler.
+CANCELLATION_MIN_DELAY = timedelta(hours=12)
+
 # Intervalle (en secondes) entre deux passages du thread d'arrière-plan qui
 # libère automatiquement les paiements arrivés au bout de leur délai.
 AUTO_RELEASE_POLL_SECONDS = 60
@@ -187,6 +197,11 @@ def init_db():
             student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             amount_cents INTEGER NOT NULL,
+            -- Part reversée au professeur et commission prélevée par la
+            -- plateforme (admin) au moment du versement (release). Restent
+            -- NULL tant que le paiement est en séquestre ou s'il est remboursé.
+            teacher_amount_cents INTEGER,
+            commission_cents INTEGER,
             status TEXT NOT NULL DEFAULT 'held' CHECK(status IN ('held', 'released', 'refunded')),
             release_at TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -260,6 +275,12 @@ def init_db():
         # bien pour créditer un élève (recharge Stripe) que pour créditer un
         # professeur (versement d'un cours confirmé/libéré automatiquement).
         db.execute("ALTER TABLE users ADD COLUMN wallet_cents INTEGER NOT NULL DEFAULT 0")
+
+    payment_columns = [row[1] for row in db.execute("PRAGMA table_info(payments)").fetchall()]
+    if "teacher_amount_cents" not in payment_columns:
+        db.execute("ALTER TABLE payments ADD COLUMN teacher_amount_cents INTEGER")
+    if "commission_cents" not in payment_columns:
+        db.execute("ALTER TABLE payments ADD COLUMN commission_cents INTEGER")
 
     course_columns_price = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
     if "price_cents" not in course_columns_price:
@@ -478,11 +499,21 @@ def credit_wallet(db, user_id, amount_cents, kind, description=None, stripe_sess
     )
 
 
+def slot_start_datetime(slot):
+    """Renvoie la date/heure de début d'un créneau (datetime)."""
+    return datetime.strptime(f"{slot['slot_date']} {slot['slot_time']}", "%Y-%m-%d %H:%M")
+
+
 def slot_end_datetime(slot):
     """Renvoie la date/heure de fin d'un créneau (datetime), utilisée pour
     calculer le moment où le séquestre du paiement devient libérable."""
-    start = datetime.strptime(f"{slot['slot_date']} {slot['slot_time']}", "%Y-%m-%d %H:%M")
-    return start + timedelta(minutes=int(slot["duration_minutes"]))
+    return slot_start_datetime(slot) + timedelta(minutes=int(slot["duration_minutes"]))
+
+
+def slot_is_cancellable(slot):
+    """Un créneau ne peut plus être annulé (ni par le professeur, ni par
+    l'élève) dans les CANCELLATION_MIN_DELAY (12h) précédant son début."""
+    return datetime.now() <= slot_start_datetime(slot) - CANCELLATION_MIN_DELAY
 
 
 def create_payment_hold(db, slot, course, student_id):
@@ -507,16 +538,48 @@ def create_payment_hold(db, slot, course, student_id):
     return cur.lastrowid
 
 
+def admin_id_from_db(db):
+    """Comme get_admin_id(), mais prend explicitement une connexion en
+    paramètre : nécessaire car release_payment() est aussi appelée depuis le
+    thread d'arrière-plan (run_auto_release_once), en dehors de tout contexte
+    de requête Flask, où get_db()/g n'est pas disponible."""
+    row = db.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
+    return row["id"] if row else None
+
+
 def release_payment(db, payment, reason="auto"):
-    """Verse le paiement séquestré au professeur (crédite son portefeuille)."""
+    """Verse le paiement séquestré : une commission (ADMIN_COMMISSION_RATE)
+    est prélevée pour la plateforme et versée au compte admin, le reste est
+    crédité au professeur. Cette commission n'est prélevée que sur les
+    transactions qui se sont déroulées correctement (confirmation de l'élève
+    ou libération automatique) — jamais en cas de remboursement."""
+    amount = payment["amount_cents"]
+    commission = round(amount * ADMIN_COMMISSION_RATE)
+    teacher_amount = amount - commission
+
+    origin = "Cours confirmé" if reason == "student" else "Versement automatique après 24h"
+
+    admin_id = admin_id_from_db(db)
+    if commission > 0 and admin_id:
+        credit_wallet(
+            db, admin_id, commission, "release",
+            description=f"Commission plateforme ({ADMIN_COMMISSION_RATE * 100:.0f} %) — {origin.lower()} (paiement #{payment['id']})",
+            payment_id=payment["id"],
+        )
+
     credit_wallet(
-        db, payment["teacher_id"], payment["amount_cents"], "release",
-        description="Cours confirmé — versement" if reason == "student" else "Versement automatique après 24h",
+        db, payment["teacher_id"], teacher_amount, "release",
+        description=f"{origin} — versement (commission plateforme déduite)",
         payment_id=payment["id"],
     )
     db.execute(
-        "UPDATE payments SET status = 'released', resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
-        (payment["id"],),
+        """
+        UPDATE payments
+        SET status = 'released', resolved_at = CURRENT_TIMESTAMP,
+            teacher_amount_cents = ?, commission_cents = ?
+        WHERE id = ?
+        """,
+        (teacher_amount, commission, payment["id"]),
     )
 
 
@@ -931,6 +994,22 @@ def inscription_cours(course_id):
 @login_required(role="etudiant")
 def desinscription_cours(course_id, slot_id):
     db = get_db()
+    slot = db.execute(
+        "SELECT * FROM slots WHERE id = ? AND course_id = ? AND reserved_by = ?",
+        (slot_id, course_id, current_user()["id"]),
+    ).fetchone()
+    if not slot:
+        flash("Créneau introuvable ou déjà annulé.", "error")
+        return redirect(request.referrer or url_for("etudiant"))
+
+    if not slot_is_cancellable(slot):
+        flash(
+            "Impossible d'annuler ce créneau : il commence dans moins de 12h. "
+            "Passé ce délai, la séance ne peut plus être annulée.",
+            "error",
+        )
+        return redirect(request.referrer or url_for("etudiant"))
+
     cur = db.execute(
         """
         UPDATE slots SET reserved_by = NULL, student_notes = NULL, slot_mode = NULL
@@ -1394,10 +1473,40 @@ def prof_creer():
 @login_required(role="prof")
 def prof_supprimer(course_id):
     db = get_db()
-    db.execute(
-        "DELETE FROM courses WHERE id = ? AND teacher_id = ?",
+    course = db.execute(
+        "SELECT * FROM courses WHERE id = ? AND teacher_id = ?",
         (course_id, current_user()["id"]),
-    )
+    ).fetchone()
+    if not course:
+        flash("Cours introuvable.", "error")
+        return redirect(url_for("prof_dashboard"))
+
+    slots = db.execute("SELECT * FROM slots WHERE course_id = ?", (course_id,)).fetchall()
+
+    # Un professeur ne peut pas annuler une séance déjà réservée dans les 12h
+    # précédant son début : on bloque la suppression du cours tant qu'un de
+    # ses créneaux réservés est dans ce cas.
+    non_cancellable = [s for s in slots if s["reserved_by"] and not slot_is_cancellable(s)]
+    if non_cancellable:
+        flash(
+            "Impossible de supprimer ce cours : au moins un créneau réservé "
+            "commence dans moins de 12h et ne peut plus être annulé.",
+            "error",
+        )
+        return redirect(url_for("prof_dashboard"))
+
+    # Les créneaux réservés et déjà payés (paiement en séquestre) qui sont
+    # annulés ici doivent être remboursés à l'élève, comme pour une
+    # désinscription classique.
+    for slot in slots:
+        if slot["reserved_by"]:
+            payment = db.execute(
+                "SELECT * FROM payments WHERE slot_id = ? AND status = 'held'", (slot["id"],)
+            ).fetchone()
+            if payment:
+                refund_payment(db, payment)
+
+    db.execute("DELETE FROM courses WHERE id = ? AND teacher_id = ?", (course_id, current_user()["id"]))
     db.commit()
     flash("Cours supprimé.", "success")
     return redirect(url_for("prof_dashboard"))
@@ -1436,6 +1545,15 @@ def admin_dashboard():
         ORDER BY c.id DESC
         """
     ).fetchall()
+
+    admin_id = get_admin_id()
+    commission_total_cents = db.execute(
+        "SELECT COALESCE(SUM(commission_cents), 0) FROM payments WHERE status = 'released'"
+    ).fetchone()[0]
+    admin_wallet_cents = db.execute(
+        "SELECT wallet_cents FROM users WHERE id = ?", (admin_id,)
+    ).fetchone()[0] if admin_id else 0
+
     return render_template(
         "admin_dashboard.html",
         profs=profs,
@@ -1444,6 +1562,9 @@ def admin_dashboard():
         courses=courses_rows,
         slots_map=get_slots_map(db, [c["id"] for c in courses_rows]),
         registration_mode=get_registration_mode(),
+        admin_commission_rate=ADMIN_COMMISSION_RATE,
+        commission_total_cents=commission_total_cents,
+        admin_wallet_cents=admin_wallet_cents,
     )
 
 
