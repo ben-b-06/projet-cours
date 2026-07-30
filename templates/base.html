@@ -58,6 +58,11 @@
 <li><a class="tree-link {{ 'active' if request.endpoint=='etudiant_calendrier' else '' }}" href="{{ url_for('etudiant_calendrier') }}"><span class="dot"></span>Calendrier</a></li>
 <li><a class="tree-link {{ 'active' if request.endpoint=='etudiant_profil' else '' }}" href="{{ url_for('etudiant_profil') }}"><span class="dot"></span>Mon profil</a></li>
 <li><a class="tree-link {{ 'active' if request.endpoint in ['messagerie','messagerie_conversation'] else '' }}" href="{{ url_for('messagerie') }}"><span class="dot"></span>Messagerie{% if unread_messages_total %} ({{ unread_messages_total }}){% endif %}</a></li>
+</ul>
+</li>
+{% endif %}
+
+{% if current_user and current_user['role'] == 'admin' %}
 <li>
 <span class="tree-group">Administration</span>
 <ul>
