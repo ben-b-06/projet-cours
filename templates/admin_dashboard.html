@@ -11,6 +11,17 @@
     <div class="card stat-card"><div class="stat-num">{{ courses|length }}</div><div class="stat-label">Cours</div></div>
   </div>
 
+  <div class="section-title" style="margin-bottom:0.8rem;"><h2>Revenus de la plateforme</h2></div>
+  <div class="card" style="padding:1.2rem 1.4rem;margin-bottom:2.2rem;">
+    <p style="color:var(--text-muted);font-size:0.88rem;margin:0 0 0.6rem;">
+      Commission prélevée sur chaque paiement versé à un professeur ({{ (admin_commission_rate * 100)|round|int }} % des transactions terminées avec succès — hors remboursements).
+    </p>
+    <div class="stats-row" style="margin:0;">
+      <div class="card stat-card"><div class="stat-num">{{ commission_total_cents|euros }}</div><div class="stat-label">Commissions perçues au total</div></div>
+      <div class="card stat-card"><div class="stat-num">{{ admin_wallet_cents|euros }}</div><div class="stat-label">Solde actuel du compte admin</div></div>
+    </div>
+  </div>
+
   <div class="section-title" style="margin-bottom:0.8rem;"><h2>Paramètres d'inscription</h2></div>
   <div class="card" style="padding:1.2rem 1.4rem;margin-bottom:2.2rem;">
     <p style="color:var(--text-muted);font-size:0.88rem;margin:0 0 1rem;">
