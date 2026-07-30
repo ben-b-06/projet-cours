@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+  <span class="eyebrow">Étudiant / Mon portefeuille</span>
+  <div class="row-between" style="margin-bottom:1.6rem;">
+    <h2 style="font-size:1.5rem;margin:0;">Solde disponible : {{ current_user['wallet_cents']|euros }}</h2>
+  </div>
+
+  {% if not stripe_configured %}
+  <div class="flash flash-error" style="position:static;margin-bottom:1.2rem;">
+    Le paiement par carte n'est pas encore configuré sur ce serveur (clé Stripe manquante côté administrateur).
+  </div>
+  {% endif %}
+
+  <div class="card form-card wide">
+    <h3 style="font-size:1.1rem;margin:0 0 1rem;">Recharger mon compte</h3>
+    <form method="post" action="{{ url_for('portefeuille_recharger') }}">
+      <div class="field">
+        <label>Montant</label>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.6rem;">
+          {% for amount in topup_amounts %}
+            <button type="button" class="btn btn-outline amount-pick" data-amount="{{ amount }}" style="font-size:0.85rem;padding:0.45rem 0.9rem;">{{ amount }} €</button>
+          {% endfor %}
+        </div>
+        <input type="number" id="amountInput" name="amount" min="1" step="0.5" placeholder="Autre montant (€)" required>
+      </div>
+      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;" {{ 'disabled' if not stripe_configured else '' }}>
+        💳 Payer par carte (Stripe)
+      </button>
+    </form>
+  </div>
+
+  <h3 style="font-size:1.1rem;margin:1.6rem 0 0.8rem;">Historique</h3>
+  {% if transactions %}
+  <table class="mono" style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+    <thead>
+      <tr style="text-align:left;border-bottom:1px solid var(--border,#ddd);">
+        <th style="padding:0.4rem;">Date</th>
+        <th style="padding:0.4rem;">Type</th>
+        <th style="padding:0.4rem;">Détail</th>
+        <th style="padding:0.4rem;text-align:right;">Montant</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in transactions %}
+      <tr style="border-bottom:1px solid var(--border,#eee);">
+        <td style="padding:0.4rem;">{{ t['created_at'] }}</td>
+        <td style="padding:0.4rem;">
+          {% if t['kind'] == 'topup' %}Recharge
+          {% elif t['kind'] == 'hold' %}Séquestre
+          {% elif t['kind'] == 'release' %}Versement
+          {% elif t['kind'] == 'refund' %}Remboursement
+          {% endif %}
+        </td>
+        <td style="padding:0.4rem;">{{ t['description'] or '' }}</td>
+        <td style="padding:0.4rem;text-align:right;color:{{ 'var(--sage,#5a7d5a)' if t['amount_cents'] >= 0 else '#b64545' }};">
+          {{ '+' if t['amount_cents'] >= 0 else '' }}{{ t['amount_cents']|euros }}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">Aucun mouvement pour le moment.</div>
+  {% endif %}
+
+  <script>
+    document.querySelectorAll('.amount-pick').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document.getElementById('amountInput').value = btn.dataset.amount;
+      });
+    });
+  </script>
+{% endblock %}

@@ -83,7 +83,7 @@
     {% set free_slots = course_slots|selectattr('reserved_by', 'none')|list %}
     <div class="card course-card" id="course-{{ c['id'] }}">
       <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
-      <h3>{{ c['title'] }}</h3>
+      <h3>{{ c['title'] }} <span style="font-size:0.85rem;color:var(--gold,#b8860b);font-weight:600;">— {{ c['price_cents']|euros }} / séance</span></h3>
       <p class="course-desc">{{ c['description'] }}</p>
       <p style="font-size:0.8rem;color:var(--text-muted);margin:-0.4rem 0 0.6rem;">
         {% if c['mode'] == 'en_ligne' %}🎥 En ligne

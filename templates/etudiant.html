@@ -28,6 +28,35 @@
           <strong>Sujets à travailler :</strong> {{ r['student_notes'] }}
         </p>
       {% endif %}
+
+      {% if r['payment_id'] %}
+        <div style="font-size:0.82rem;background:var(--paper);padding:0.6rem 0.7rem;border-radius:8px;">
+          {% if r['payment_status'] == 'held' %}
+            <p style="margin:0 0 0.4rem;"><strong>{{ r['payment_amount_cents']|euros }}</strong> en séquestre pour ce cours.
+            {% if course_over_map.get(r['id']) %}
+              Confirmez avant le <span class="mono">{{ r['payment_release_at'] }}</span>, sinon le professeur sera payé automatiquement.
+            {% else %}
+              Sera libérable 24h après le cours (le <span class="mono">{{ r['payment_release_at'] }}</span>).
+            {% endif %}
+            </p>
+            {% if course_over_map.get(r['id']) %}
+              <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+                <form method="post" action="{{ url_for('confirmer_paiement', payment_id=r['payment_id']) }}">
+                  <button class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" type="submit">✅ Confirmer que le cours s'est bien passé</button>
+                </form>
+                <form method="post" action="{{ url_for('rembourser_paiement', payment_id=r['payment_id']) }}" onsubmit="return confirm('Demander un remboursement pour ce cours ?');">
+                  <button class="btn-danger-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" type="submit">↩️ Demander un remboursement</button>
+                </form>
+              </div>
+            {% endif %}
+          {% elif r['payment_status'] == 'released' %}
+            <span style="color:var(--sage,#5a7d5a);">✅ Paiement de {{ r['payment_amount_cents']|euros }} versé au professeur.</span>
+          {% elif r['payment_status'] == 'refunded' %}
+            <span>↩️ Remboursé : {{ r['payment_amount_cents']|euros }} recrédités sur votre portefeuille.</span>
+          {% endif %}
+        </div>
+      {% endif %}
+
       <div class="course-meta">
         <span>Par {{ r['teacher_name'] }}</span>
         <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('messagerie_conversation', contact_id=r['teacher_id']) }}">Écrire au prof</a>

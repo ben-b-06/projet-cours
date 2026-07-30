@@ -41,6 +41,14 @@
         <div class="stat-label">Pas encore de note</div>
       {% endif %}
     </div>
+    <div class="card stat-card">
+      <div class="stat-num">{{ current_user['wallet_cents']|euros }}</div>
+      <div class="stat-label">Portefeuille disponible</div>
+    </div>
+    <div class="card stat-card">
+      <div class="stat-num">{{ pending_cents|euros }}</div>
+      <div class="stat-label">En séquestre (cours pas encore confirmés)</div>
+    </div>
   </div>
 
   <div class="section-title"><h2>Mes cours</h2></div>
@@ -51,7 +59,7 @@
     {% set course_slots = slots_map.get(c['id'], []) %}
     <div class="card course-card">
       <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
-      <h3>{{ c['title'] }}</h3>
+      <h3>{{ c['title'] }} <span style="font-size:0.85rem;color:var(--gold,#b8860b);font-weight:600;">— {{ c['price_cents']|euros }} / séance</span></h3>
       <p class="course-desc">{{ c['description'] }}</p>
       <p style="font-size:0.8rem;color:var(--text-muted);margin:-0.4rem 0 0.6rem;">
         {% if c['mode'] == 'en_ligne' %}🎥 En ligne
