@@ -11,11 +11,14 @@ Puis ouvrir http://127.0.0.1:5000
 import os
 import json
 import secrets
+import threading
+import time as time_mod
 import calendar as calendar_mod
-from datetime import date
+from datetime import date, datetime, timedelta
 from functools import wraps
 import sqlite3
 
+import stripe
 from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -46,6 +49,39 @@ MODE_LABELS = {"en_ligne": "En ligne", "presentiel": "En présentiel", "les_deux
 # Identifiants du compte administrateur unique — aucun autre admin ne peut être créé.
 ADMIN_EMAIL = "admin@cours.fr"
 ADMIN_PASSWORD = "nezufnze48746è_ç"
+
+
+# ---------------------------------------------------------------------------
+# Paiements — Stripe + portefeuille interne + séquestre (escrow)
+# ---------------------------------------------------------------------------
+# Clés à définir en variables d'environnement (jamais en dur dans le code) :
+#   STRIPE_SECRET_KEY      -> clé secrète Stripe (sk_test_... / sk_live_...)
+#   STRIPE_PUBLISHABLE_KEY -> clé publique Stripe (pk_test_... / pk_live_...)
+#   STRIPE_WEBHOOK_SECRET  -> secret de signature du webhook (whsec_...)
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+stripe.api_key = STRIPE_SECRET_KEY
+
+# Montants de recharge proposés à l'élève, en euros.
+WALLET_TOPUP_AMOUNTS = [10, 20, 50, 100]
+
+# Délai laissé à l'élève, après la fin du cours, pour confirmer que tout
+# s'est bien passé ou pour demander un remboursement. Passé ce délai, le
+# paiement séquestré est automatiquement versé au professeur.
+PAYMENT_HOLD_DELAY = timedelta(hours=24)
+
+# Intervalle (en secondes) entre deux passages du thread d'arrière-plan qui
+# libère automatiquement les paiements arrivés au bout de leur délai.
+AUTO_RELEASE_POLL_SECONDS = 60
+
+
+@app.template_filter("euros")
+def euros(cents):
+    """Formate un montant en centimes vers une chaîne '12,50 €'."""
+    if cents is None:
+        cents = 0
+    return f"{cents / 100:.2f}".replace(".", ",") + " €"
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +176,36 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Paiement séquestré (escrow) pour un créneau réservé et payé par un
+        -- élève. Le professeur n'est crédité qu'à la confirmation de l'élève,
+        -- au remboursement (annulation), ou automatiquement 24h après la fin
+        -- du cours si l'élève n'a rien fait entre-temps.
+        CREATE TABLE IF NOT EXISTS payments(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot_id INTEGER NOT NULL UNIQUE REFERENCES slots(id) ON DELETE CASCADE,
+            course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+            student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            amount_cents INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'held' CHECK(status IN ('held', 'released', 'refunded')),
+            release_at TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TEXT
+        );
+
+        -- Mouvements du portefeuille interne d'un utilisateur : recharges
+        -- Stripe, mises en séquestre, versements reçus, remboursements.
+        CREATE TABLE IF NOT EXISTS wallet_transactions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            amount_cents INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('topup', 'hold', 'release', 'refund')),
+            description TEXT,
+            stripe_session_id TEXT,
+            payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- Note laissée par un élève sur un professeur avec qui un cours a été
         -- réservé. Un élève ne peut laisser qu'une seule note par prof (elle est
         -- mise à jour s'il note à nouveau). Seule la moyenne est visible par le
@@ -189,6 +255,16 @@ def init_db():
         # Pour un professeur : son niveau d'étude (ex. Master, Doctorat...).
         # Pour un élève : sa classe (ex. Terminale, 6e...).
         db.execute("ALTER TABLE users ADD COLUMN education_level TEXT")
+    if "wallet_cents" not in user_columns:
+        # Solde du portefeuille interne (en centimes d'euro), utilisé aussi
+        # bien pour créditer un élève (recharge Stripe) que pour créditer un
+        # professeur (versement d'un cours confirmé/libéré automatiquement).
+        db.execute("ALTER TABLE users ADD COLUMN wallet_cents INTEGER NOT NULL DEFAULT 0")
+
+    course_columns_price = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
+    if "price_cents" not in course_columns_price:
+        # Prix d'une séance pour ce cours, en centimes d'euro.
+        db.execute("ALTER TABLE courses ADD COLUMN price_cents INTEGER NOT NULL DEFAULT 0")
 
     slot_columns = [row[1] for row in db.execute("PRAGMA table_info(slots)").fetchall()]
     if "reserved_by" not in slot_columns:
@@ -382,6 +458,116 @@ def get_teacher_ratings_map(db, teacher_ids):
         teacher_ids,
     ).fetchall()
     return {r["teacher_id"]: {"avg": r["avg_rating"], "count": r["nb_ratings"]} for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Portefeuille & séquestre des paiements
+# ---------------------------------------------------------------------------
+def credit_wallet(db, user_id, amount_cents, kind, description=None, stripe_session_id=None, payment_id=None):
+    """Crédite (amount_cents > 0) ou débite (amount_cents < 0) le portefeuille
+    d'un utilisateur et journalise le mouvement. Ne fait pas de commit."""
+    db.execute("UPDATE users SET wallet_cents = wallet_cents + ? WHERE id = ?", (amount_cents, user_id))
+    db.execute(
+        """
+        INSERT INTO wallet_transactions(user_id, amount_cents, kind, description, stripe_session_id, payment_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, amount_cents, kind, description, stripe_session_id, payment_id),
+    )
+
+
+def slot_end_datetime(slot):
+    """Renvoie la date/heure de fin d'un créneau (datetime), utilisée pour
+    calculer le moment où le séquestre du paiement devient libérable."""
+    start = datetime.strptime(f"{slot['slot_date']} {slot['slot_time']}", "%Y-%m-%d %H:%M")
+    return start + timedelta(minutes=int(slot["duration_minutes"]))
+
+
+def create_payment_hold(db, slot, course, student_id):
+    """Débite le portefeuille de l'élève du prix du cours et met la somme en
+    séquestre (statut 'held') jusqu'à confirmation, remboursement, ou
+    libération automatique 24h après la fin du cours."""
+    amount = course["price_cents"] or 0
+    if amount <= 0:
+        return None
+    release_at = slot_end_datetime(slot) + PAYMENT_HOLD_DELAY
+    credit_wallet(
+        db, student_id, -amount, "hold",
+        description=f"Paiement séquestré pour « {course['title']} »",
+    )
+    cur = db.execute(
+        """
+        INSERT INTO payments(slot_id, course_id, student_id, teacher_id, amount_cents, status, release_at)
+        VALUES (?, ?, ?, ?, ?, 'held', ?)
+        """,
+        (slot["id"], course["id"], student_id, course["teacher_id"], amount, release_at.strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    return cur.lastrowid
+
+
+def release_payment(db, payment, reason="auto"):
+    """Verse le paiement séquestré au professeur (crédite son portefeuille)."""
+    credit_wallet(
+        db, payment["teacher_id"], payment["amount_cents"], "release",
+        description="Cours confirmé — versement" if reason == "student" else "Versement automatique après 24h",
+        payment_id=payment["id"],
+    )
+    db.execute(
+        "UPDATE payments SET status = 'released', resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (payment["id"],),
+    )
+
+
+def refund_payment(db, payment):
+    """Rembourse l'élève : recrédite son portefeuille interne avec la somme
+    initialement séquestrée."""
+    credit_wallet(
+        db, payment["student_id"], payment["amount_cents"], "refund",
+        description="Remboursement demandé par l'élève",
+        payment_id=payment["id"],
+    )
+    db.execute(
+        "UPDATE payments SET status = 'refunded', resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (payment["id"],),
+    )
+
+
+def run_auto_release_once():
+    """Parcourt les paiements toujours en séquestre dont le délai de 24h est
+    dépassé et les verse automatiquement au professeur."""
+    db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys = ON")
+    try:
+        due = db.execute(
+            "SELECT * FROM payments WHERE status = 'held' AND release_at <= ?",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
+        ).fetchall()
+        for payment in due:
+            release_payment(db, payment, reason="auto")
+        if due:
+            db.commit()
+    finally:
+        db.close()
+
+
+def start_auto_release_background_thread():
+    """Démarre un thread démon qui libère périodiquement les paiements dont
+    le délai de 24h est écoulé. Solution simple adaptée à un déploiement
+    mono-processus ; pour un déploiement multi-worker (ex. plusieurs workers
+    gunicorn), préférer un vrai job planifié (cron, Celery beat...) qui
+    appelle run_auto_release_once()."""
+
+    def loop():
+        while True:
+            try:
+                run_auto_release_once()
+            except Exception as exc:  # ne jamais laisser le thread mourir silencieusement
+                print(f"[auto-release] erreur : {exc}")
+            time_mod.sleep(AUTO_RELEASE_POLL_SECONDS)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
 
 
 @app.template_filter("duree_lisible")
@@ -680,6 +866,17 @@ def inscription_cours(course_id):
         flash("Sélectionnez au moins un créneau à réserver.", "error")
         return redirect(url_for("cours"))
 
+    price = course["price_cents"] or 0
+    total_cost = price * len(slot_ids)
+    student = current_user()
+    if total_cost > (student["wallet_cents"] or 0):
+        flash(
+            f"Solde insuffisant : cette réservation coûte {euros(total_cost)} mais votre "
+            f"portefeuille contient {euros(student['wallet_cents'])}. Rechargez votre compte.",
+            "error",
+        )
+        return redirect(url_for("portefeuille"))
+
     # Modalité effective du créneau : fixée par le cours, sauf si celui-ci
     # propose les deux, auquel cas l'élève choisit pour chaque créneau réservé.
     reserved = 0
@@ -694,21 +891,26 @@ def inscription_cours(course_id):
             UPDATE slots SET reserved_by = ?, student_notes = ?, slot_mode = ?
             WHERE id = ? AND course_id = ? AND reserved_by IS NULL
             """,
-            (current_user()["id"], notes, slot_mode, slot_id, course_id),
+            (student["id"], notes, slot_mode, slot_id, course_id),
         )
-        reserved += cur.rowcount
+        if cur.rowcount:
+            reserved += 1
+            slot = db.execute("SELECT * FROM slots WHERE id = ?", (slot_id,)).fetchone()
+            create_payment_hold(db, slot, course, student["id"])
 
     if reserved:
         # On garde une trace durable de la mise en relation élève/prof pour la
         # messagerie, même si l'élève annule ses créneaux plus tard.
         db.execute(
             "INSERT OR IGNORE INTO contacts(student_id, teacher_id, course_id) VALUES (?, ?, ?)",
-            (current_user()["id"], course["teacher_id"], course_id),
+            (student["id"], course["teacher_id"], course_id),
         )
         db.commit()
         if reserved == len(slot_ids):
             flash(
-                f"{reserved} créneau(x) réservé(s) ! Retrouvez-les dans « Mes cours ».",
+                f"{reserved} créneau(x) réservé(s) et payé(s) ({euros(price * reserved)}) ! "
+                "L'argent est conservé en séquestre et sera versé au professeur 24h après le "
+                "cours, sauf si vous confirmez avant ou demandez un remboursement.",
                 "success",
             )
         else:
@@ -718,6 +920,7 @@ def inscription_cours(course_id):
                 "error",
             )
     else:
+        db.rollback()
         flash("Les créneaux choisis venaient d'être réservés par un autre élève.", "error")
     return redirect(url_for("cours"))
 
@@ -726,15 +929,197 @@ def inscription_cours(course_id):
 @login_required(role="etudiant")
 def desinscription_cours(course_id, slot_id):
     db = get_db()
-    db.execute(
+    cur = db.execute(
         """
         UPDATE slots SET reserved_by = NULL, student_notes = NULL, slot_mode = NULL
         WHERE id = ? AND course_id = ? AND reserved_by = ?
         """,
         (slot_id, course_id, current_user()["id"]),
     )
+    if cur.rowcount:
+        # Si un paiement était en séquestre pour ce créneau, on rembourse
+        # intégralement l'élève sur son portefeuille interne.
+        payment = db.execute(
+            "SELECT * FROM payments WHERE slot_id = ? AND status = 'held'", (slot_id,)
+        ).fetchone()
+        if payment:
+            refund_payment(db, payment)
     db.commit()
-    flash("Vous avez annulé ce créneau.", "success")
+    flash("Vous avez annulé ce créneau (le paiement éventuel a été remboursé sur votre portefeuille).", "success")
+    return redirect(request.referrer or url_for("etudiant"))
+
+
+# ---------------------------------------------------------------------------
+# Routes — Portefeuille & paiements (Stripe)
+# ---------------------------------------------------------------------------
+@app.route("/portefeuille")
+@login_required(role="etudiant")
+def portefeuille():
+    db = get_db()
+    user = current_user()
+    transactions = db.execute(
+        "SELECT * FROM wallet_transactions WHERE user_id = ? ORDER BY id DESC LIMIT 50",
+        (user["id"],),
+    ).fetchall()
+    return render_template(
+        "portefeuille.html",
+        transactions=transactions,
+        topup_amounts=WALLET_TOPUP_AMOUNTS,
+        stripe_configured=bool(STRIPE_SECRET_KEY),
+    )
+
+
+@app.route("/portefeuille/recharger", methods=["POST"])
+@login_required(role="etudiant")
+def portefeuille_recharger():
+    if not STRIPE_SECRET_KEY:
+        flash(
+            "Le paiement par carte n'est pas encore configuré sur ce serveur "
+            "(variable d'environnement STRIPE_SECRET_KEY manquante).",
+            "error",
+        )
+        return redirect(url_for("portefeuille"))
+
+    amount_raw = request.form.get("amount", "").strip().replace(",", ".")
+    try:
+        amount_euros = float(amount_raw)
+        if amount_euros < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        flash("Montant de recharge invalide.", "error")
+        return redirect(url_for("portefeuille"))
+
+    amount_cents = round(amount_euros * 100)
+    user = current_user()
+
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": "eur",
+                        "product_data": {"name": "Recharge du portefeuille CoursConnect"},
+                        "unit_amount": amount_cents,
+                    },
+                    "quantity": 1,
+                }
+            ],
+            customer_email=user["email"],
+            client_reference_id=str(user["id"]),
+            metadata={"user_id": str(user["id"]), "amount_cents": str(amount_cents)},
+            success_url=url_for("portefeuille_succes", _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=url_for("portefeuille_annule", _external=True),
+        )
+    except Exception as exc:
+        flash(f"Impossible de démarrer le paiement Stripe : {exc}", "error")
+        return redirect(url_for("portefeuille"))
+
+    return redirect(checkout_session.url, code=303)
+
+
+def credit_wallet_from_checkout_session(checkout_session):
+    """Crédite le portefeuille d'un élève à partir d'une Session Stripe Checkout
+    payée, en s'assurant de ne jamais la créditer deux fois (idempotence)."""
+    if checkout_session.get("payment_status") != "paid":
+        return False
+    db = get_db()
+    already = db.execute(
+        "SELECT id FROM wallet_transactions WHERE stripe_session_id = ?",
+        (checkout_session["id"],),
+    ).fetchone()
+    if already:
+        return False
+    user_id = int(checkout_session["metadata"]["user_id"])
+    amount_cents = int(checkout_session["metadata"]["amount_cents"])
+    credit_wallet(
+        db, user_id, amount_cents, "topup",
+        description="Recharge par carte bancaire (Stripe)",
+        stripe_session_id=checkout_session["id"],
+    )
+    db.commit()
+    return True
+
+
+@app.route("/portefeuille/succes")
+@login_required(role="etudiant")
+def portefeuille_succes():
+    session_id = request.args.get("session_id")
+    if session_id and STRIPE_SECRET_KEY:
+        try:
+            checkout_session = stripe.checkout.Session.retrieve(session_id)
+            if credit_wallet_from_checkout_session(checkout_session):
+                flash("Votre portefeuille a été rechargé avec succès !", "success")
+            else:
+                flash("Ce paiement a déjà été pris en compte.", "success")
+        except Exception as exc:
+            flash(f"Paiement reçu mais impossible de vérifier la session Stripe : {exc}", "error")
+    return redirect(url_for("portefeuille"))
+
+
+@app.route("/portefeuille/annule")
+@login_required(role="etudiant")
+def portefeuille_annule():
+    flash("Recharge annulée : aucun montant n'a été débité.", "error")
+    return redirect(url_for("portefeuille"))
+
+
+@app.route("/stripe/webhook", methods=["POST"])
+def stripe_webhook():
+    """Point d'entrée webhook Stripe : filet de sécurité qui crédite le
+    portefeuille même si l'élève ferme son navigateur avant la redirection
+    vers /portefeuille/succes. À déclarer dans le Dashboard Stripe avec
+    l'événement 'checkout.session.completed'."""
+    payload = request.data
+    sig_header = request.headers.get("Stripe-Signature", "")
+    try:
+        if STRIPE_WEBHOOK_SECRET:
+            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+        else:
+            event = json.loads(payload)
+    except (ValueError, stripe.error.SignatureVerificationError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    if event["type"] == "checkout.session.completed":
+        checkout_session = event["data"]["object"]
+        with app.app_context():
+            credit_wallet_from_checkout_session(checkout_session)
+
+    return jsonify({"received": True})
+
+
+@app.route("/etudiant/paiement/<int:payment_id>/confirmer", methods=["POST"])
+@login_required(role="etudiant")
+def confirmer_paiement(payment_id):
+    db = get_db()
+    payment = db.execute(
+        "SELECT * FROM payments WHERE id = ? AND student_id = ? AND status = 'held'",
+        (payment_id, current_user()["id"]),
+    ).fetchone()
+    if not payment:
+        flash("Paiement introuvable ou déjà réglé.", "error")
+        return redirect(url_for("etudiant"))
+    release_payment(db, payment, reason="student")
+    db.commit()
+    flash("Merci ! Le professeur a été payé pour ce cours.", "success")
+    return redirect(request.referrer or url_for("etudiant"))
+
+
+@app.route("/etudiant/paiement/<int:payment_id>/rembourser", methods=["POST"])
+@login_required(role="etudiant")
+def rembourser_paiement(payment_id):
+    db = get_db()
+    payment = db.execute(
+        "SELECT * FROM payments WHERE id = ? AND student_id = ? AND status = 'held'",
+        (payment_id, current_user()["id"]),
+    ).fetchone()
+    if not payment:
+        flash("Paiement introuvable ou déjà réglé.", "error")
+        return redirect(url_for("etudiant"))
+    refund_payment(db, payment)
+    db.commit()
+    flash("Remboursement effectué sur votre portefeuille.", "success")
     return redirect(request.referrer or url_for("etudiant"))
 
 
@@ -850,12 +1235,17 @@ def prof_dashboard():
     # Le prof ne voit que sa moyenne et le nombre de notes reçues, jamais le
     # détail des notes individuelles laissées par ses élèves.
     my_rating = get_teacher_ratings_map(db, [user["id"]]).get(user["id"])
+    pending_cents = db.execute(
+        "SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE teacher_id = ? AND status = 'held'",
+        (user["id"],),
+    ).fetchone()[0]
     return render_template(
         "prof_dashboard.html",
         courses=rows,
         reserved_count=reserved_count,
         slots_map=slots_map,
         my_rating=my_rating,
+        pending_cents=pending_cents,
     )
 
 
@@ -914,6 +1304,7 @@ def prof_creer():
         description = request.form.get("description", "").strip()
         mode = request.form.get("mode", "")
         city = request.form.get("city", "").strip()
+        price_raw = request.form.get("price", "").strip().replace(",", ".")
 
         slot_dates = request.form.getlist("slot_date[]")
         slot_times = request.form.getlist("slot_time[]")
@@ -934,6 +1325,15 @@ def prof_creer():
             errors.append("Merci de renseigner la ville où le cours a lieu en présentiel.")
         if mode == "en_ligne":
             city = ""
+
+        price_cents = None
+        try:
+            price_value = float(price_raw)
+            if price_value < 0:
+                raise ValueError
+            price_cents = round(price_value * 100)
+        except (TypeError, ValueError):
+            errors.append("Merci d'indiquer un prix par séance valide (ex. 25 ou 25,50).")
 
         slots = []
         for date_val, time_val, duration_val in zip(slot_dates, slot_times, slot_durations):
@@ -970,8 +1370,8 @@ def prof_creer():
 
         db = get_db()
         cur = db.execute(
-            "INSERT INTO courses(title, subject, level, description, teacher_id, mode, city) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (title, subject, level, description, current_user()["id"], mode, city or None),
+            "INSERT INTO courses(title, subject, level, description, teacher_id, mode, city, price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (title, subject, level, description, current_user()["id"], mode, city or None, price_cents),
         )
         course_id = cur.lastrowid
         for date_val, time_val, duration in slots:
@@ -1219,10 +1619,13 @@ def etudiant():
     reservations = db.execute(
         """
         SELECT sl.*, c.id AS course_id, c.title, c.subject, c.level, c.description,
-               c.teacher_id, c.city AS course_city, u.name AS teacher_name
+               c.teacher_id, c.city AS course_city, c.price_cents, u.name AS teacher_name,
+               p.id AS payment_id, p.status AS payment_status, p.amount_cents AS payment_amount_cents,
+               p.release_at AS payment_release_at
         FROM slots sl
         JOIN courses c ON c.id = sl.course_id
         JOIN users u ON u.id = c.teacher_id
+        LEFT JOIN payments p ON p.slot_id = sl.id
         WHERE sl.reserved_by = ?
         ORDER BY sl.slot_date, sl.slot_time
         """,
@@ -1235,7 +1638,19 @@ def etudiant():
             (current_user()["id"],),
         ).fetchall()
     }
-    return render_template("etudiant.html", reservations=reservations, my_ratings=my_ratings)
+    now = datetime.now()
+    course_over_map = {}
+    for r in reservations:
+        try:
+            course_over_map[r["id"]] = slot_end_datetime(r) <= now
+        except (TypeError, ValueError):
+            course_over_map[r["id"]] = False
+    return render_template(
+        "etudiant.html",
+        reservations=reservations,
+        my_ratings=my_ratings,
+        course_over_map=course_over_map,
+    )
 
 
 @app.route("/profs/<int:teacher_id>/noter", methods=["POST"])
@@ -1848,6 +2263,7 @@ def admin_reinitialiser_mot_de_passe(user_id):
 
 # ---------------------------------------------------------------------------
 init_db()
+start_auto_release_background_thread()
 
 if __name__ == "__main__":
     app.run(debug=True)
