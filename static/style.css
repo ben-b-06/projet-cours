@@ -607,7 +607,52 @@ label{font-size:0.83rem;font-weight:600;color:var(--text-muted);display:block;ma
 .msg-bubble.mine{align-self:flex-end;background:var(--indigo-accent);color:#fff;}
 .msg-bubble.mine .msg-time{color:rgba(255,255,255,0.75);}
 .msg-form{display:flex;gap:0.6rem;align-items:flex-end;}
-.msg-form textarea{resize:vertical;}
+.msg-form textarea{resize:vertical;flex:1;}
+.msg-attach-btn{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:2.4rem;
+  height:2.4rem;
+  border:1px solid var(--border);
+  border-radius:8px;
+  cursor:pointer;
+  font-size:1.1rem;
+  background:var(--paper);
+  transition:background .15s ease;
+  flex-shrink:0;
+}
+.msg-attach-btn:hover{background:rgba(108,111,168,0.08);}
+.msg-attach-name{
+  font-size:0.75rem;
+  color:var(--text-muted);
+  max-width:120px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.msg-attachment{margin:0.3rem 0;}
+.msg-attachment-img{
+  max-width:220px;
+  max-height:220px;
+  border-radius:8px;
+  display:block;
+  object-fit:cover;
+}
+.msg-attachment-file{
+  display:inline-flex;
+  align-items:center;
+  gap:0.4rem;
+  padding:0.4rem 0.7rem;
+  border-radius:8px;
+  background:rgba(0,0,0,0.06);
+  font-size:0.82rem;
+  text-decoration:none;
+  color:inherit;
+}
+.msg-bubble.mine .msg-attachment-file{background:rgba(255,255,255,0.18);}
+.msg-attachment-icon{font-size:1rem;}
+.msg-attachment-name{word-break:break-all;}
 @media (max-width: 860px){
   .msg-shell{grid-template-columns:1fr;}
 }
