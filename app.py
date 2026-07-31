@@ -214,11 +214,28 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             amount_cents INTEGER NOT NULL,
-            kind TEXT NOT NULL CHECK(kind IN ('topup', 'hold', 'release', 'refund')),
+            kind TEXT NOT NULL CHECK(kind IN ('topup', 'hold', 'release', 'refund', 'withdrawal')),
             description TEXT,
             stripe_session_id TEXT,
             payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Demandes de retrait de fonds (admin, prof ou élève) : le montant est
+        -- débité du portefeuille dès la demande (mouvement 'withdrawal'), puis
+        -- un administrateur marque la demande comme payée ou la refuse (auquel
+        -- cas le montant est recrédité automatiquement).
+        CREATE TABLE IF NOT EXISTS withdrawals(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            amount_cents INTEGER NOT NULL,
+            method TEXT NOT NULL,
+            details TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'paid', 'rejected')),
+            admin_note TEXT,
+            wallet_transaction_id INTEGER REFERENCES wallet_transactions(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TEXT
         );
 
         -- Note laissée par un élève sur un professeur avec qui un cours a été
@@ -317,6 +334,35 @@ def init_db():
         db.execute("ALTER TABLE courses DROP COLUMN reserved_by")
     if "student_notes" in course_columns:
         db.execute("ALTER TABLE courses DROP COLUMN student_notes")
+
+    # Anciennes bases : la table wallet_transactions existe déjà avec un CHECK
+    # qui n'autorise pas encore le type 'withdrawal' (retrait). SQLite ne sait
+    # pas modifier un CHECK en place, on reconstruit donc la table.
+    wt_schema_row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wallet_transactions'"
+    ).fetchone()
+    if wt_schema_row and "withdrawal" not in wt_schema_row[0]:
+        db.executescript(
+            """
+            ALTER TABLE wallet_transactions RENAME TO wallet_transactions_old;
+            CREATE TABLE wallet_transactions(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                amount_cents INTEGER NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('topup', 'hold', 'release', 'refund', 'withdrawal')),
+                description TEXT,
+                stripe_session_id TEXT,
+                payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO wallet_transactions(
+                id, user_id, amount_cents, kind, description, stripe_session_id, payment_id, created_at
+            )
+            SELECT id, user_id, amount_cents, kind, description, stripe_session_id, payment_id, created_at
+            FROM wallet_transactions_old;
+            DROP TABLE wallet_transactions_old;
+            """
+        )
 
     os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
 
@@ -488,15 +534,54 @@ def get_teacher_ratings_map(db, teacher_ids):
 
 def credit_wallet(db, user_id, amount_cents, kind, description=None, stripe_session_id=None, payment_id=None):
     """Crédite (amount_cents > 0) ou débite (amount_cents < 0) le portefeuille
-    d'un utilisateur et journalise le mouvement. Ne fait pas de commit."""
+    d'un utilisateur et journalise le mouvement. Ne fait pas de commit.
+    Renvoie l'id du mouvement créé dans wallet_transactions."""
     db.execute("UPDATE users SET wallet_cents = wallet_cents + ? WHERE id = ?", (amount_cents, user_id))
-    db.execute(
+    cur = db.execute(
         """
         INSERT INTO wallet_transactions(user_id, amount_cents, kind, description, stripe_session_id, payment_id)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (user_id, amount_cents, kind, description, stripe_session_id, payment_id),
     )
+    return cur.lastrowid
+
+
+WITHDRAWAL_METHODS = {
+    "virement": "Virement bancaire (IBAN)",
+    "especes": "Retrait en espèces (à convenir avec l'administration)",
+}
+
+
+class WithdrawalError(Exception):
+    pass
+
+
+def request_withdrawal(db, user, amount_cents, method, details):
+    """Débite immédiatement le portefeuille de l'utilisateur et enregistre une
+    demande de retrait en attente de traitement par un administrateur.
+    Lève WithdrawalError si la demande est invalide. Ne fait pas de commit."""
+    if amount_cents <= 0:
+        raise WithdrawalError("Montant de retrait invalide.")
+    if amount_cents > (user["wallet_cents"] or 0):
+        raise WithdrawalError("Solde insuffisant pour ce retrait.")
+    if method not in WITHDRAWAL_METHODS:
+        raise WithdrawalError("Moyen de retrait invalide.")
+    if not details or not details.strip():
+        raise WithdrawalError("Merci de préciser vos coordonnées pour le versement (IBAN, etc.).")
+
+    wt_id = credit_wallet(
+        db, user["id"], -amount_cents, "withdrawal",
+        description=f"Demande de retrait ({WITHDRAWAL_METHODS[method]})",
+    )
+    cur = db.execute(
+        """
+        INSERT INTO withdrawals(user_id, amount_cents, method, details, wallet_transaction_id)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (user["id"], amount_cents, method, details.strip(), wt_id),
+    )
+    return cur.lastrowid
 
 
 def slot_start_datetime(slot):
@@ -714,18 +799,24 @@ def dashboard_url_for(role):
 
 
 def login_required(role=None):
+    """role peut être None (connexion simple requise), une chaîne (un seul
+    rôle autorisé) ou un tuple/liste de rôles autorisés."""
+    allowed_roles = None
+    if role is not None:
+        allowed_roles = (role,) if isinstance(role, str) else tuple(role)
+
     def decorator(view):
         @wraps(view)
         def wrapped(*args, **kwargs):
             user = current_user()
-            if not user or (role and user["role"] != role):
+            if not user or (allowed_roles and user["role"] not in allowed_roles):
                 message = (
                     "Connectez-vous avec un compte professeur pour accéder à cette page."
-                    if role == "prof"
+                    if allowed_roles == ("prof",)
                     else "Connectez-vous avec un compte étudiant pour accéder à cette page."
-                    if role == "etudiant"
+                    if allowed_roles == ("etudiant",)
                     else "Connectez-vous avec un compte administrateur pour accéder à cette page."
-                    if role == "admin"
+                    if allowed_roles == ("admin",)
                     else "Connectez-vous pour accéder à cette page."
                 )
                 flash(message, "error")
@@ -1034,7 +1125,7 @@ def desinscription_cours(course_id, slot_id):
 # Routes — Portefeuille & paiements (Stripe)
 # ---------------------------------------------------------------------------
 @app.route("/portefeuille")
-@login_required(role="etudiant")
+@login_required()
 def portefeuille():
     db = get_db()
     user = current_user()
@@ -1042,12 +1133,54 @@ def portefeuille():
         "SELECT * FROM wallet_transactions WHERE user_id = ? ORDER BY id DESC LIMIT 50",
         (user["id"],),
     ).fetchall()
+    withdrawals = db.execute(
+        "SELECT * FROM withdrawals WHERE user_id = ? ORDER BY id DESC LIMIT 50",
+        (user["id"],),
+    ).fetchall()
     return render_template(
         "portefeuille.html",
         transactions=transactions,
+        withdrawals=withdrawals,
         topup_amounts=WALLET_TOPUP_AMOUNTS,
+        withdrawal_methods=WITHDRAWAL_METHODS,
         stripe_configured=bool(STRIPE_SECRET_KEY),
     )
+
+
+@app.route("/portefeuille/retirer", methods=["POST"])
+@login_required()
+def portefeuille_retirer():
+    db = get_db()
+    user = current_user()
+
+    amount_raw = request.form.get("amount", "").strip().replace(",", ".")
+    method = request.form.get("method", "").strip()
+    details = request.form.get("details", "").strip()
+
+    try:
+        amount_euros = float(amount_raw)
+        if amount_euros <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        flash("Montant de retrait invalide.", "error")
+        return redirect(url_for("portefeuille"))
+
+    amount_cents = round(amount_euros * 100)
+
+    try:
+        request_withdrawal(db, user, amount_cents, method, details)
+    except WithdrawalError as exc:
+        db.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("portefeuille"))
+
+    db.commit()
+    flash(
+        f"Demande de retrait de {euros(amount_cents)} envoyée. "
+        "Elle sera traitée par un administrateur.",
+        "success",
+    )
+    return redirect(url_for("portefeuille"))
 
 
 @app.route("/portefeuille/recharger", methods=["POST"])
@@ -1554,6 +1687,10 @@ def admin_dashboard():
         "SELECT wallet_cents FROM users WHERE id = ?", (admin_id,)
     ).fetchone()[0] if admin_id else 0
 
+    pending_withdrawals_count = db.execute(
+        "SELECT COUNT(*) FROM withdrawals WHERE status = 'pending'"
+    ).fetchone()[0]
+
     return render_template(
         "admin_dashboard.html",
         profs=profs,
@@ -1565,7 +1702,77 @@ def admin_dashboard():
         admin_commission_rate=ADMIN_COMMISSION_RATE,
         commission_total_cents=commission_total_cents,
         admin_wallet_cents=admin_wallet_cents,
+        pending_withdrawals_count=pending_withdrawals_count,
     )
+
+
+@app.route("/admin/retraits")
+@login_required(role="admin")
+def admin_retraits():
+    db = get_db()
+    demandes = db.execute(
+        """
+        SELECT w.*, u.name AS user_name, u.email AS user_email, u.role AS user_role
+        FROM withdrawals w
+        JOIN users u ON u.id = w.user_id
+        ORDER BY (w.status = 'pending') DESC, w.id DESC
+        """
+    ).fetchall()
+    pending_count = sum(1 for d in demandes if d["status"] == "pending")
+    return render_template(
+        "admin_retraits.html",
+        demandes=demandes,
+        pending_count=pending_count,
+        withdrawal_methods=WITHDRAWAL_METHODS,
+    )
+
+
+@app.route("/admin/retraits/<int:withdrawal_id>/payer", methods=["POST"])
+@login_required(role="admin")
+def admin_retrait_payer(withdrawal_id):
+    db = get_db()
+    demande = db.execute("SELECT * FROM withdrawals WHERE id = ?", (withdrawal_id,)).fetchone()
+    if not demande:
+        flash("Demande de retrait introuvable.", "error")
+        return redirect(url_for("admin_retraits"))
+    if demande["status"] != "pending":
+        flash("Cette demande a déjà été traitée.", "error")
+        return redirect(url_for("admin_retraits"))
+
+    db.execute(
+        "UPDATE withdrawals SET status = 'paid', resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (withdrawal_id,),
+    )
+    db.commit()
+    flash("Retrait marqué comme payé.", "success")
+    return redirect(url_for("admin_retraits"))
+
+
+@app.route("/admin/retraits/<int:withdrawal_id>/refuser", methods=["POST"])
+@login_required(role="admin")
+def admin_retrait_refuser(withdrawal_id):
+    db = get_db()
+    demande = db.execute("SELECT * FROM withdrawals WHERE id = ?", (withdrawal_id,)).fetchone()
+    if not demande:
+        flash("Demande de retrait introuvable.", "error")
+        return redirect(url_for("admin_retraits"))
+    if demande["status"] != "pending":
+        flash("Cette demande a déjà été traitée.", "error")
+        return redirect(url_for("admin_retraits"))
+
+    note = request.form.get("admin_note", "").strip() or None
+    # Le montant retiré est recrédité au demandeur.
+    credit_wallet(
+        db, demande["user_id"], demande["amount_cents"], "refund",
+        description="Retrait refusé : montant recrédité sur le portefeuille",
+    )
+    db.execute(
+        "UPDATE withdrawals SET status = 'rejected', admin_note = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (note, withdrawal_id),
+    )
+    db.commit()
+    flash("Retrait refusé, le montant a été recrédité à l'utilisateur.", "success")
+    return redirect(url_for("admin_retraits"))
 
 
 @app.route("/admin/parametres/inscriptions", methods=["POST"])
@@ -2045,8 +2252,13 @@ def inject_unread_total():
             "SELECT COUNT(*) FROM messages WHERE recipient_id = ? AND read_at IS NULL",
             (user["id"],),
         ).fetchone()[0]
-        return {"unread_messages_total": total}
-    return {"unread_messages_total": 0}
+        pending_withdrawals = 0
+        if user["role"] == "admin":
+            pending_withdrawals = get_db().execute(
+                "SELECT COUNT(*) FROM withdrawals WHERE status = 'pending'"
+            ).fetchone()[0]
+        return {"unread_messages_total": total, "pending_withdrawals_total": pending_withdrawals}
+    return {"unread_messages_total": 0, "pending_withdrawals_total": 0}
 
 
 @app.route("/messagerie")
