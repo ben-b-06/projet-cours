@@ -18,6 +18,7 @@
   <div class="card form-card wide">
     <h3 style="font-size:1.1rem;margin:0 0 1rem;">Recharger mon compte</h3>
     <form method="post" action="{{ url_for('portefeuille_recharger') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="field">
         <label>Montant</label>
         <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.6rem;">
@@ -40,6 +41,7 @@
     <div class="empty-state">Votre solde est nul, aucun retrait n'est possible pour le moment.</div>
     {% else %}
     <form method="post" action="{{ url_for('portefeuille_retirer') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="field">
         <label>Montant à retirer (solde disponible : {{ current_user['wallet_cents']|euros }})</label>
         <input type="number" name="amount" min="1" step="0.5" max="{{ '%.2f'|format(current_user['wallet_cents']/100) }}" placeholder="Montant (€)" required>

@@ -14,6 +14,7 @@
 
   {% if current_user['role'] == 'admin' %}
   <form method="post" action="{{ url_for('messagerie_diffusion') }}" class="card" style="padding:1rem 1.2rem;margin-bottom:1.4rem;display:flex;gap:0.7rem;align-items:flex-end;flex-wrap:wrap;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="field" style="flex:1;min-width:220px;margin-bottom:0;">
       <label>Message à tout le monde (tous les professeurs et élèves)</label>
       <textarea name="body" rows="2" placeholder="Écrivez une annonce à diffuser à tous les utilisateurs…" required></textarea>
@@ -66,6 +67,7 @@
           {% endif %}
         </div>
         <form method="post" action="{{ url_for('messagerie_conversation', contact_id=active_contact['id']) }}" class="msg-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <textarea name="body" rows="2" placeholder="Écrivez votre message…" required></textarea>
           <button class="btn btn-gold" type="submit">Envoyer</button>
         </form>

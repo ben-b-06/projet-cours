@@ -42,9 +42,11 @@
             {% if course_over_map.get(r['id']) %}
               <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
                 <form method="post" action="{{ url_for('confirmer_paiement', payment_id=r['payment_id']) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" type="submit">✅ Confirmer que le cours s'est bien passé</button>
                 </form>
                 <form method="post" action="{{ url_for('rembourser_paiement', payment_id=r['payment_id']) }}" onsubmit="return confirm('Demander un remboursement pour ce cours ?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button class="btn-danger-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" type="submit">↩️ Demander un remboursement</button>
                 </form>
               </div>
@@ -64,12 +66,14 @@
           <a class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('visio', course_id=r['course_id'], slot_id=r['id']) }}">🎥 Visioconférence</a>
         {% endif %}
         <form method="post" action="{{ url_for('desinscription_cours', course_id=r['course_id'], slot_id=r['id']) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button class="btn-danger-outline">Annuler ce créneau</button>
         </form>
       </div>
 
       {% set my_note = my_ratings.get(r['teacher_id']) %}
       <form method="post" action="{{ url_for('noter_prof', teacher_id=r['teacher_id']) }}" class="rate-teacher">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <span class="rate-teacher-label">{{ 'Modifier ma note pour ' if my_note else 'Noter ' }}{{ r['teacher_name'] }} :</span>
         <span class="star-picker">
           {% for n in [1, 2, 3, 4, 5] %}

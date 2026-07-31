@@ -31,6 +31,7 @@
       Choisissez qui peut créer un compte sur la plateforme.
     </p>
     <form method="post" action="{{ url_for('admin_definir_mode_inscription') }}" style="display:flex;flex-wrap:wrap;gap:0.7rem;align-items:center;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <label class="slot-pick {{ 'is-mine' if registration_mode == 'profs' else '' }}" style="cursor:pointer;">
         <input type="radio" name="registration_mode" value="profs" {{ 'checked' if registration_mode == 'profs' else '' }} onchange="this.form.requestSubmit()">
         Professeurs uniquement
@@ -57,10 +58,12 @@
         <div style="display:flex;gap:0.5rem;">
           <form method="post" action="{{ url_for('admin_valider_prof', user_id=p['id']) }}"
                 onsubmit="return confirm('Valider ce professeur ? Son profil et ses cours deviendront publics.');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn btn-gold">Valider le profil</button>
           </form>
           <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=p['id']) }}"
                 onsubmit="return confirm('Supprimer ce professeur ?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn-danger-outline">Supprimer</button>
           </form>
         </div>
@@ -85,10 +88,12 @@
         <div style="display:flex;gap:0.5rem;">
           <form method="post" action="{{ url_for('admin_reinitialiser_mot_de_passe', user_id=p['id']) }}"
                 onsubmit="return confirm('Générer un nouveau mot de passe temporaire pour ce professeur ?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn btn-outline">Réinitialiser le mot de passe</button>
           </form>
           <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=p['id']) }}"
                 onsubmit="return confirm('Supprimer ce professeur ? Tous ses cours seront aussi supprimés.');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn-danger-outline">Supprimer</button>
           </form>
         </div>
@@ -113,10 +118,12 @@
         <div style="display:flex;gap:0.5rem;">
           <form method="post" action="{{ url_for('admin_reinitialiser_mot_de_passe', user_id=s['id']) }}"
                 onsubmit="return confirm('Générer un nouveau mot de passe temporaire pour cet élève ?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn btn-outline">Réinitialiser le mot de passe</button>
           </form>
           <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=s['id']) }}"
                 onsubmit="return confirm('Supprimer cet étudiant ?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button class="btn-danger-outline">Supprimer</button>
           </form>
         </div>
@@ -142,6 +149,7 @@
         <span>Par {{ c['teacher_name'] }} · {{ course_slots|selectattr('reserved_by')|list|length }} / {{ course_slots|length }} créneau(x) réservé(s)</span>
         <form method="post" action="{{ url_for('admin_supprimer_cours', course_id=c['id']) }}"
               onsubmit="return confirm('Supprimer ce cours ?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <button class="btn-danger-outline">Supprimer</button>
         </form>
       </div>

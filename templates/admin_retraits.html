@@ -48,10 +48,12 @@
           <div style="display:flex;flex-direction:column;gap:0.4rem;">
             <form method="post" action="{{ url_for('admin_retrait_payer', withdrawal_id=d['id']) }}"
                   onsubmit="return confirm('Confirmer que ce retrait de {{ d['amount_cents']|euros }} a bien été versé à {{ d['user_name'] }} ?');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button class="btn btn-gold" style="font-size:0.78rem;padding:0.35rem 0.7rem;width:100%;">Marquer payé</button>
             </form>
             <form method="post" action="{{ url_for('admin_retrait_refuser', withdrawal_id=d['id']) }}"
                   onsubmit="return confirm('Refuser cette demande ? Le montant sera recrédité à {{ d['user_name'] }}.');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <input type="hidden" name="admin_note" value="Retrait refusé par l'administrateur">
               <button class="btn-danger-outline" style="font-size:0.78rem;padding:0.35rem 0.7rem;width:100%;">Refuser</button>
             </form>

@@ -6,6 +6,7 @@
     <p class="mono" style="font-size:0.8rem;color:var(--text-muted);margin:0 0 1.3rem;">{{ user['email'] }}</p>
 
     <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="field">
         <label>Mot de passe actuel</label>
         <input type="password" name="current_password" required placeholder="••••••••">

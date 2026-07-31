@@ -4,6 +4,7 @@
   <div class="card form-card">
     <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Créer un compte</h2>
     <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="field">
         <label>Nom complet</label>
         <input type="text" name="name" required placeholder="Prénom Nom">

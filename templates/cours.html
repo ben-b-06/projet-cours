@@ -113,6 +113,7 @@
 
       {% if current_user and current_user['role'] == 'etudiant' and free_slots %}
         <form method="post" action="{{ url_for('inscription_cours', course_id=c['id']) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <ul class="slot-list slot-list-picker">
             {% for s in course_slots %}
               <li>

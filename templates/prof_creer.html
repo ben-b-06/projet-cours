@@ -4,6 +4,7 @@
   <div class="card form-card wide">
     <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Nouveau cours</h2>
     <form method="post" id="courseForm">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="field">
         <label>Titre du cours</label>
         <input type="text" name="title" required placeholder="Ex. Préparer le brevet de mathématiques"

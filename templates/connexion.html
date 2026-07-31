@@ -4,6 +4,7 @@
   <div class="card form-card">
     <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Se connecter</h2>
     <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="field">
         <label>Adresse e-mail</label>
         <input type="email" name="email" required placeholder="vous@exemple.fr">
