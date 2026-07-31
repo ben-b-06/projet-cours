@@ -1,3 +1,4 @@
 Flask>=3.0
 gunicorn
 stripe>=9.0
+Flask-WTF>=1.2
