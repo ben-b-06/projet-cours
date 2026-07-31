@@ -479,6 +479,45 @@ def init_db():
             """
         )
 
+    # RÉPARATION D'UN ÉTAT DÉJÀ CASSÉ EN PRODUCTION : une version précédente
+    # de cette migration renommait wallet_transactions AVANT de recréer la
+    # table (RENAME ... TO wallet_transactions_old), ce qui a fait pointer la
+    # FK de `withdrawals.wallet_transaction_id` vers "wallet_transactions_old"
+    # (réécriture automatique de SQLite lors d'un RENAME). Cette table a
+    # ensuite été supprimée, laissant une FK vers une table inexistante — ce
+    # qui provoque "no such table: main.wallet_transactions_old" dès qu'on
+    # supprime un utilisateur ayant une demande de retrait. On détecte ce cas
+    # précis et on reconstruit `withdrawals` avec la FK correcte, en gardant
+    # toutes les données (les id référencés dans wallet_transaction_id restent
+    # valides : ils ont été copiés tels quels vers la nouvelle table).
+    withdrawals_schema_row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'withdrawals'"
+    ).fetchone()
+    if withdrawals_schema_row and "wallet_transactions_old" in withdrawals_schema_row[0]:
+        db.executescript(
+            """
+            CREATE TABLE withdrawals_new(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                amount_cents INTEGER NOT NULL,
+                method TEXT NOT NULL,
+                details TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'paid', 'rejected')),
+                admin_note TEXT,
+                wallet_transaction_id INTEGER REFERENCES wallet_transactions(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                resolved_at TEXT
+            );
+            INSERT INTO withdrawals_new(
+                id, user_id, amount_cents, method, details, status, admin_note, wallet_transaction_id, created_at, resolved_at
+            )
+            SELECT id, user_id, amount_cents, method, details, status, admin_note, wallet_transaction_id, created_at, resolved_at
+            FROM withdrawals;
+            DROP TABLE withdrawals;
+            ALTER TABLE withdrawals_new RENAME TO withdrawals;
+            """
+        )
+
     os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
 
     # Le compte admin est toujours garanti d'exister, avec des identifiants fixes.
