@@ -21,6 +21,7 @@ import sqlite3
 import stripe
 from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify, send_from_directory
 from werkzeug.security import generate_password_hash, check_password_hash
+from flask_wtf import CSRFProtect
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = "/var/data"
@@ -30,8 +31,49 @@ PROFILE_PHOTOS_DIR = os.path.join(DATA_DIR, "uploads", "profils")
 ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 
 app = Flask(__name__)
-app.secret_key = "dev-secret-key-change-me"  # à remplacer par une vraie valeur secrète en production
+
+# FAILLE CORRIGÉE : la clé secrète était codée en dur dans le code source
+# (visible publiquement sur GitHub), ce qui permet de forger des cookies de
+# session (usurpation d'identité, y compris admin). Elle doit désormais être
+# fournie via la variable d'environnement FLASK_SECRET_KEY. En son absence,
+# une clé aléatoire est générée à chaque démarrage : cela reste utilisable en
+# développement local mais invalide les sessions à chaque redémarrage, ce qui
+# force à configurer correctement la variable en production.
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
+if not os.environ.get("FLASK_SECRET_KEY"):
+    print(
+        "ATTENTION : FLASK_SECRET_KEY n'est pas définie. Une clé temporaire "
+        "aléatoire a été générée pour cette exécution — définissez cette "
+        "variable d'environnement en production pour des sessions stables "
+        "et sécurisées."
+    )
+
 app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo max pour les photos de profil
+
+# FAILLE CORRIGÉE : durcissement des cookies de session.
+# - HTTPONLY : empêche JavaScript (donc une éventuelle injection XSS) de lire le cookie de session.
+# - SAMESITE=Lax : limite l'envoi du cookie sur des requêtes cross-site (protection CSRF de base).
+# - SECURE : le cookie n'est envoyé que via HTTPS (activé via FLASK_ENV=production ou FORCE_HTTPS=1).
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("FORCE_HTTPS", "0") == "1"
+
+# FAILLE CORRIGÉE : absence de protection CSRF sur les formulaires POST
+# (changement de mot de passe, suppression de compte/cours, retraits de
+# fonds, etc.). Flask-WTF ajoute un jeton CSRF vérifié sur chaque requête
+# POST/PUT/PATCH/DELETE ; les templates doivent inclure {{ csrf_token() }}
+# dans chaque formulaire (voir templates modifiés).
+app.config["WTF_CSRF_TIME_LIMIT"] = None
+csrf = CSRFProtect(app)
+
+
+@app.after_request
+def set_security_headers(response):
+    """Ajoute des en-têtes HTTP de sécurité de base sur toutes les réponses."""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return response
 
 # Choix fermés pour la matière et le niveau scolaire (du collège au lycée)
 MATIERES = ["Mathématiques", "Physique-Chimie","SI", "Français", "SVT", "SES", "Histoire-Géographie"]
@@ -47,8 +89,24 @@ MODES = ["en_ligne", "presentiel", "les_deux"]
 MODE_LABELS = {"en_ligne": "En ligne", "presentiel": "En présentiel", "les_deux": "En ligne ou en présentiel"}
 
 # Identifiants du compte administrateur unique — aucun autre admin ne peut être créé.
-ADMIN_EMAIL = "admin@cours.fr"
-ADMIN_PASSWORD = "nezufnze48746è_ç"
+# FAILLE CORRIGÉE : le mot de passe admin était écrit en clair dans le code
+# source, donc visible par quiconque consulte le dépôt public GitHub. Il doit
+# maintenant être fourni via les variables d'environnement ADMIN_EMAIL et
+# ADMIN_PASSWORD. Si ADMIN_PASSWORD est absente, un mot de passe aléatoire
+# est généré et affiché UNE SEULE FOIS au démarrage : notez-le immédiatement,
+# il ne sera plus jamais réaffiché.
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@cours.fr")
+_ADMIN_PASSWORD_ENV = os.environ.get("ADMIN_PASSWORD")
+ADMIN_PASSWORD = _ADMIN_PASSWORD_ENV or secrets.token_urlsafe(12)
+if not _ADMIN_PASSWORD_ENV:
+    print(
+        "=" * 70 + "\n"
+        "AUCUN ADMIN_PASSWORD fourni : mot de passe administrateur généré "
+        f"aléatoirement pour ce démarrage : {ADMIN_PASSWORD}\n"
+        "Notez-le maintenant : il ne sera plus jamais affiché. Définissez "
+        "la variable d'environnement ADMIN_PASSWORD pour fixer un mot de "
+        "passe stable en production.\n" + "=" * 70
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1280,18 +1338,25 @@ def portefeuille_annule():
 
 
 @app.route("/stripe/webhook", methods=["POST"])
+@csrf.exempt  # requête serveur-à-serveur de Stripe, authentifiée par signature (voir plus bas), pas par cookie
 def stripe_webhook():
     """Point d'entrée webhook Stripe : filet de sécurité qui crédite le
     portefeuille même si l'élève ferme son navigateur avant la redirection
     vers /portefeuille/succes. À déclarer dans le Dashboard Stripe avec
     l'événement 'checkout.session.completed'."""
+    # FAILLE CORRIGÉE : si STRIPE_WEBHOOK_SECRET n'était pas configuré, le
+    # code acceptait n'importe quel JSON envoyé sur cette route comme un
+    # évènement Stripe authentique, sans aucune vérification de signature.
+    # N'importe qui pouvait donc forger une requête "checkout.session.completed"
+    # et créditer le portefeuille de n'importe quel utilisateur à volonté.
+    # Le webhook est désormais refusé tant que le secret n'est pas configuré.
+    if not STRIPE_WEBHOOK_SECRET:
+        return jsonify({"error": "Webhook non configuré (STRIPE_WEBHOOK_SECRET manquant)."}), 503
+
     payload = request.data
     sig_header = request.headers.get("Stripe-Signature", "")
     try:
-        if STRIPE_WEBHOOK_SECRET:
-            event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-        else:
-            event = json.loads(payload)
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except (ValueError, stripe.error.SignatureVerificationError) as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -1362,6 +1427,16 @@ DEMO_EMAILS = {
 
 @app.route("/connexion/demo/<role>")
 def connexion_demo(role):
+    # FAILLE CORRIGÉE : cette route permettait à N'IMPORTE QUI de se
+    # connecter instantanément, sans mot de passe, sur les comptes de
+    # démonstration (prof et élève) — un contournement total de
+    # l'authentification. Elle n'est désormais active que si la variable
+    # d'environnement ENABLE_DEMO_LOGIN=1 est explicitement définie
+    # (utile en démo/formation, à ne jamais activer en production).
+    if os.environ.get("ENABLE_DEMO_LOGIN", "0") != "1":
+        flash("La connexion de démonstration n'est pas activée sur ce serveur.", "error")
+        return redirect(url_for("connexion"))
+
     email = DEMO_EMAILS.get(role)
     user = get_db().execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone() if email else None
     if user:
@@ -1394,8 +1469,8 @@ def inscription():
             flash("Les inscriptions sont actuellement réservées aux professeurs.", "error")
             return render_template("inscription.html", registration_mode=registration_mode)
 
-        if not name or not email or len(password) < 4:
-            flash("Merci de renseigner un nom, un e-mail et un mot de passe d'au moins 4 caractères.", "error")
+        if not name or not email or len(password) < 8:
+            flash("Merci de renseigner un nom, un e-mail et un mot de passe d'au moins 8 caractères.", "error")
             return render_template("inscription.html", registration_mode=registration_mode)
 
         db = get_db()
@@ -2405,6 +2480,7 @@ def visio(course_id, slot_id):
 
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/envoyer", methods=["POST"])
 @login_required()
+@csrf.exempt  # appelé en fetch() JSON same-origin ; déjà protégé par SameSite=Lax + absence de CORS
 def visio_envoyer(course_id, slot_id):
     user = current_user()
     course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
@@ -2456,6 +2532,7 @@ def visio_recevoir(course_id, slot_id):
 
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/message/envoyer", methods=["POST"])
 @login_required()
+@csrf.exempt  # appelé en fetch() JSON same-origin ; déjà protégé par SameSite=Lax + absence de CORS
 def visio_chat_envoyer(course_id, slot_id):
     """Envoie un message de chat pendant la visio. Les messages sont stockés
     dans la même table que la messagerie classique : ils apparaissent donc
@@ -2547,8 +2624,8 @@ def parametres():
         if not check_password_hash(user["password_hash"], current_password):
             flash("Mot de passe actuel incorrect.", "error")
             return render_template("parametres.html", user=user)
-        if len(new_password) < 4:
-            flash("Le nouveau mot de passe doit contenir au moins 4 caractères.", "error")
+        if len(new_password) < 8:
+            flash("Le nouveau mot de passe doit contenir au moins 8 caractères.", "error")
             return render_template("parametres.html", user=user)
         if new_password != confirm_password:
             flash("Les deux mots de passe saisis ne correspondent pas.", "error")
@@ -2601,4 +2678,10 @@ init_db()
 start_auto_release_background_thread()
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # FAILLE CORRIGÉE : debug=True active le débogueur interactif Werkzeug,
+    # qui permet d'exécuter du code Python arbitraire depuis le navigateur
+    # si la page d'erreur est atteignable (exécution de code à distance).
+    # Le mode debug ne doit être activé qu'explicitement en développement
+    # local via la variable d'environnement FLASK_DEBUG=1.
+    debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(debug=debug_mode)
