@@ -30,6 +30,13 @@ DB_PATH = os.path.join(DATA_DIR, "coursconnect.db")
 PROFILE_PHOTOS_DIR = os.path.join(DATA_DIR, "uploads", "profils")
 ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 
+# Pièces jointes de la messagerie (images et PDF uniquement).
+MESSAGE_ATTACHMENTS_DIR = os.path.join(DATA_DIR, "uploads", "messagerie")
+ALLOWED_MESSAGE_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif"}
+ALLOWED_MESSAGE_DOC_EXTENSIONS = {"pdf"}
+ALLOWED_MESSAGE_EXTENSIONS = ALLOWED_MESSAGE_IMAGE_EXTENSIONS | ALLOWED_MESSAGE_DOC_EXTENSIONS
+MAX_MESSAGE_ATTACHMENT_SIZE = 8 * 1024 * 1024  # 8 Mo max par pièce jointe
+
 app = Flask(__name__)
 
 # FAILLE CORRIGÉE : la clé secrète était codée en dur dans le code source
@@ -48,7 +55,7 @@ if not os.environ.get("FLASK_SECRET_KEY"):
         "et sécurisées."
     )
 
-app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 Mo max pour les photos de profil
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 Mo max (photos de profil et pièces jointes de messagerie)
 
 # FAILLE CORRIGÉE : durcissement des cookies de session.
 # - HTTPONLY : empêche JavaScript (donc une éventuelle injection XSS) de lire le cookie de session.
@@ -229,7 +236,11 @@ def init_db():
             recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             body TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            read_at TEXT
+            read_at TEXT,
+            -- Pièce jointe optionnelle (image ou PDF) attachée au message.
+            attachment_filename TEXT,
+            attachment_original_name TEXT,
+            attachment_type TEXT
         );
 
         -- Petits messages techniques (offres/réponses SDP, candidats ICE) échangés
@@ -356,6 +367,14 @@ def init_db():
         db.execute("ALTER TABLE payments ADD COLUMN teacher_amount_cents INTEGER")
     if "commission_cents" not in payment_columns:
         db.execute("ALTER TABLE payments ADD COLUMN commission_cents INTEGER")
+
+    message_columns = [row[1] for row in db.execute("PRAGMA table_info(messages)").fetchall()]
+    if "attachment_filename" not in message_columns:
+        db.execute("ALTER TABLE messages ADD COLUMN attachment_filename TEXT")
+    if "attachment_original_name" not in message_columns:
+        db.execute("ALTER TABLE messages ADD COLUMN attachment_original_name TEXT")
+    if "attachment_type" not in message_columns:
+        db.execute("ALTER TABLE messages ADD COLUMN attachment_type TEXT")
 
     course_columns_price = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
     if "price_cents" not in course_columns_price:
@@ -995,6 +1014,11 @@ def presentation():
     return render_template("presentation.html")
 
 
+@app.route("/cgu")
+def cgu():
+    return render_template("cgu.html")
+
+
 def parse_course_filters(args):
     """Lit les paramètres de filtre de recherche de cours depuis la querystring
     (partagé entre la vue liste et la vue calendrier)."""
@@ -1547,6 +1571,28 @@ def uploaded_profile(filename):
     return send_from_directory(PROFILE_PHOTOS_DIR, filename)
 
 
+@app.route("/uploads/messagerie/<int:message_id>/<filename>")
+@login_required()
+def uploaded_message_attachment(message_id, filename):
+    """Sert une pièce jointe de messagerie, réservée à l'expéditeur, au
+    destinataire du message, ou à l'administrateur (supervision)."""
+    user = current_user()
+    db = get_db()
+    message = db.execute(
+        "SELECT * FROM messages WHERE id = ? AND attachment_filename = ?",
+        (message_id, filename),
+    ).fetchone()
+    if not message:
+        return "Fichier introuvable.", 404
+    if user["id"] not in (message["sender_id"], message["recipient_id"]) and user["role"] != "admin":
+        return "Accès refusé.", 403
+    return send_from_directory(
+        MESSAGE_ATTACHMENTS_DIR,
+        message["attachment_filename"],
+        download_name=message["attachment_original_name"] or message["attachment_filename"],
+    )
+
+
 @app.route("/inscription", methods=["GET", "POST"])
 def inscription():
     registration_mode = get_registration_mode()
@@ -1636,6 +1682,35 @@ def prof_dashboard():
 
 def allowed_photo(filename):
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_PHOTO_EXTENSIONS
+
+
+def save_message_attachment(file_storage):
+    """Valide et enregistre une pièce jointe de messagerie (image ou PDF).
+
+    Retourne un tuple (filename, original_name, attachment_type) ou lève une
+    ValueError avec un message d'erreur destiné à l'utilisateur si le fichier
+    n'est pas autorisé.
+    """
+    filename = file_storage.filename or ""
+    if "." not in filename:
+        raise ValueError("Format de fichier non reconnu.")
+    ext = filename.rsplit(".", 1)[1].lower()
+    if ext not in ALLOWED_MESSAGE_EXTENSIONS:
+        raise ValueError("Seules les images (PNG, JPG, WEBP, GIF) et les PDF sont autorisés en pièce jointe.")
+
+    # Vérifie la taille réelle du fichier (au-delà de la limite globale Flask,
+    # qui coupe la requête entière plutôt que de renvoyer un message clair).
+    file_storage.stream.seek(0, os.SEEK_END)
+    size = file_storage.stream.tell()
+    file_storage.stream.seek(0)
+    if size > MAX_MESSAGE_ATTACHMENT_SIZE:
+        raise ValueError("Le fichier dépasse la taille maximale autorisée (8 Mo).")
+
+    attachment_type = "image" if ext in ALLOWED_MESSAGE_IMAGE_EXTENSIONS else "pdf"
+    stored_filename = f"{secrets.token_hex(16)}.{ext}"
+    os.makedirs(MESSAGE_ATTACHMENTS_DIR, exist_ok=True)
+    file_storage.save(os.path.join(MESSAGE_ATTACHMENTS_DIR, stored_filename))
+    return stored_filename, filename, attachment_type
 
 
 @app.route("/prof/profil", methods=["GET", "POST"])
@@ -2477,10 +2552,25 @@ def messagerie_conversation(contact_id):
 
     if request.method == "POST":
         body = request.form.get("body", "").strip()
-        if body:
+        attachment_file = request.files.get("attachment")
+
+        attachment_filename = attachment_original_name = attachment_type = None
+        if attachment_file and attachment_file.filename:
+            try:
+                attachment_filename, attachment_original_name, attachment_type = save_message_attachment(
+                    attachment_file
+                )
+            except ValueError as exc:
+                flash(str(exc), "error")
+                return redirect(url_for("messagerie_conversation", contact_id=contact_id))
+
+        if body or attachment_filename:
             db.execute(
-                "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
-                (user["id"], contact_id, body),
+                """
+                INSERT INTO messages(sender_id, recipient_id, body, attachment_filename, attachment_original_name, attachment_type)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user["id"], contact_id, body, attachment_filename, attachment_original_name, attachment_type),
             )
             db.commit()
         return redirect(url_for("messagerie_conversation", contact_id=contact_id))
