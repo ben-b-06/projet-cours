@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+  <span class="eyebrow">Administration / Demandes de retrait</span>
+  <h2 style="font-size:1.5rem;margin:0 0 1.6rem;">Demandes de retrait</h2>
+
+  <div class="stats-row">
+    <div class="card stat-card"><div class="stat-num">{{ pending_count }}</div><div class="stat-label">En attente</div></div>
+    <div class="card stat-card"><div class="stat-num">{{ demandes|length }}</div><div class="stat-label">Total des demandes</div></div>
+  </div>
+
+  {% if demandes %}
+  <table class="mono" style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+    <thead>
+      <tr style="text-align:left;border-bottom:1px solid var(--border,#ddd);">
+        <th style="padding:0.5rem;">Date</th>
+        <th style="padding:0.5rem;">Utilisateur</th>
+        <th style="padding:0.5rem;">Rôle</th>
+        <th style="padding:0.5rem;">Montant</th>
+        <th style="padding:0.5rem;">Moyen</th>
+        <th style="padding:0.5rem;">Coordonnées</th>
+        <th style="padding:0.5rem;">Statut</th>
+        <th style="padding:0.5rem;">Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in demandes %}
+      <tr style="border-bottom:1px solid var(--border,#eee);{{ 'background:rgba(201,162,39,0.08);' if d['status']=='pending' else '' }}">
+        <td style="padding:0.5rem;white-space:nowrap;">{{ d['created_at'] }}</td>
+        <td style="padding:0.5rem;">{{ d['user_name'] }}<br><span style="color:var(--text-muted);font-size:0.75rem;">{{ d['user_email'] }}</span></td>
+        <td style="padding:0.5rem;">
+          {% if d['user_role']=='admin' %}Admin
+          {% elif d['user_role']=='prof' %}Prof
+          {% else %}Élève
+          {% endif %}
+        </td>
+        <td style="padding:0.5rem;font-weight:600;">{{ d['amount_cents']|euros }}</td>
+        <td style="padding:0.5rem;">{{ withdrawal_methods.get(d['method'], d['method']) }}</td>
+        <td style="padding:0.5rem;max-width:220px;white-space:pre-wrap;word-break:break-word;">{{ d['details'] }}</td>
+        <td style="padding:0.5rem;">
+          {% if d['status'] == 'pending' %}<span style="color:var(--gold,#c9a227);">⏳ En attente</span>
+          {% elif d['status'] == 'paid' %}<span style="color:var(--sage,#5a7d5a);">✅ Payé</span>
+          {% elif d['status'] == 'rejected' %}<span style="color:#b64545;">❌ Refusé</span>
+          {% endif %}
+          {% if d['admin_note'] %}<br><span style="font-size:0.75rem;color:var(--text-muted);">{{ d['admin_note'] }}</span>{% endif %}
+        </td>
+        <td style="padding:0.5rem;">
+          {% if d['status'] == 'pending' %}
+          <div style="display:flex;flex-direction:column;gap:0.4rem;">
+            <form method="post" action="{{ url_for('admin_retrait_payer', withdrawal_id=d['id']) }}"
+                  onsubmit="return confirm('Confirmer que ce retrait de {{ d['amount_cents']|euros }} a bien été versé à {{ d['user_name'] }} ?');">
+              <button class="btn btn-gold" style="font-size:0.78rem;padding:0.35rem 0.7rem;width:100%;">Marquer payé</button>
+            </form>
+            <form method="post" action="{{ url_for('admin_retrait_refuser', withdrawal_id=d['id']) }}"
+                  onsubmit="return confirm('Refuser cette demande ? Le montant sera recrédité à {{ d['user_name'] }}.');">
+              <input type="hidden" name="admin_note" value="Retrait refusé par l'administrateur">
+              <button class="btn-danger-outline" style="font-size:0.78rem;padding:0.35rem 0.7rem;width:100%;">Refuser</button>
+            </form>
+          </div>
+          {% else %}
+          <span style="color:var(--text-muted);font-size:0.78rem;">Traité le {{ d['resolved_at'] }}</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty-state">Aucune demande de retrait pour le moment.</div>
+  {% endif %}
+{% endblock %}

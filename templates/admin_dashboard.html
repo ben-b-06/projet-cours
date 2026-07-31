@@ -19,6 +19,9 @@
     <div class="stats-row" style="margin:0;">
       <div class="card stat-card"><div class="stat-num">{{ commission_total_cents|euros }}</div><div class="stat-label">Commissions perçues au total</div></div>
       <div class="card stat-card"><div class="stat-num">{{ admin_wallet_cents|euros }}</div><div class="stat-label">Solde actuel du compte admin</div></div>
+      <a class="card stat-card" href="{{ url_for('admin_retraits') }}" style="text-decoration:none;color:inherit;{{ 'border-color:var(--gold,#c9a227);' if pending_withdrawals_count else '' }}">
+        <div class="stat-num">{{ pending_withdrawals_count }}</div><div class="stat-label">Demande(s) de retrait en attente</div>
+      </a>
     </div>
   </div>
 

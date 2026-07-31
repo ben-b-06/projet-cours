@@ -1,10 +1,14 @@
 {% extends "base.html" %}
 {% block content %}
-  <span class="eyebrow">Étudiant / Mon portefeuille</span>
+  <span class="eyebrow">
+    {{ 'Administrateur' if current_user['role']=='admin' else ('Professeur' if current_user['role']=='prof' else 'Étudiant') }}
+    / Mon portefeuille
+  </span>
   <div class="row-between" style="margin-bottom:1.6rem;">
     <h2 style="font-size:1.5rem;margin:0;">Solde disponible : {{ current_user['wallet_cents']|euros }}</h2>
   </div>
 
+  {% if current_user['role'] == 'etudiant' %}
   {% if not stripe_configured %}
   <div class="flash flash-error" style="position:static;margin-bottom:1.2rem;">
     Le paiement par carte n'est pas encore configuré sur ce serveur (clé Stripe manquante côté administrateur).
@@ -28,6 +32,69 @@
       </button>
     </form>
   </div>
+  {% endif %}
+
+  <div class="card form-card wide" style="margin-top:1.2rem;">
+    <h3 style="font-size:1.1rem;margin:0 0 1rem;">Retirer des fonds</h3>
+    {% if current_user['wallet_cents'] <= 0 %}
+    <div class="empty-state">Votre solde est nul, aucun retrait n'est possible pour le moment.</div>
+    {% else %}
+    <form method="post" action="{{ url_for('portefeuille_retirer') }}">
+      <div class="field">
+        <label>Montant à retirer (solde disponible : {{ current_user['wallet_cents']|euros }})</label>
+        <input type="number" name="amount" min="1" step="0.5" max="{{ '%.2f'|format(current_user['wallet_cents']/100) }}" placeholder="Montant (€)" required>
+      </div>
+      <div class="field">
+        <label>Moyen de versement</label>
+        <select name="method" required>
+          {% for key, label in withdrawal_methods.items() %}
+            <option value="{{ key }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Coordonnées (IBAN ou informations nécessaires au versement)</label>
+        <textarea name="details" rows="3" placeholder="Ex : IBAN FR76 ..., titulaire du compte..." required></textarea>
+      </div>
+      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;">
+        💸 Demander le retrait
+      </button>
+      <p class="muted" style="font-size:0.8rem;margin-top:0.6rem;">
+        Le montant est immédiatement retenu sur votre solde. Un administrateur traite ensuite votre demande ;
+        en cas de refus, le montant vous est automatiquement recrédité.
+      </p>
+    </form>
+    {% endif %}
+  </div>
+
+  {% if withdrawals %}
+  <h3 style="font-size:1.1rem;margin:1.6rem 0 0.8rem;">Mes demandes de retrait</h3>
+  <table class="mono" style="width:100%;border-collapse:collapse;font-size:0.82rem;">
+    <thead>
+      <tr style="text-align:left;border-bottom:1px solid var(--border,#ddd);">
+        <th style="padding:0.4rem;">Date</th>
+        <th style="padding:0.4rem;">Montant</th>
+        <th style="padding:0.4rem;">Moyen</th>
+        <th style="padding:0.4rem;">Statut</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for w in withdrawals %}
+      <tr style="border-bottom:1px solid var(--border,#eee);">
+        <td style="padding:0.4rem;">{{ w['created_at'] }}</td>
+        <td style="padding:0.4rem;">{{ w['amount_cents']|euros }}</td>
+        <td style="padding:0.4rem;">{{ withdrawal_methods.get(w['method'], w['method']) }}</td>
+        <td style="padding:0.4rem;">
+          {% if w['status'] == 'pending' %}⏳ En attente
+          {% elif w['status'] == 'paid' %}✅ Payé
+          {% elif w['status'] == 'rejected' %}❌ Refusé (remboursé)
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
 
   <h3 style="font-size:1.1rem;margin:1.6rem 0 0.8rem;">Historique</h3>
   {% if transactions %}
@@ -49,6 +116,7 @@
           {% elif t['kind'] == 'hold' %}Séquestre
           {% elif t['kind'] == 'release' %}Versement
           {% elif t['kind'] == 'refund' %}Remboursement
+          {% elif t['kind'] == 'withdrawal' %}Retrait
           {% endif %}
         </td>
         <td style="padding:0.4rem;">{{ t['description'] or '' }}</td>
