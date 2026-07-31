@@ -34,7 +34,11 @@
             {% if c['unread'] %}<span class="msg-badge">{{ c['unread'] }}</span>{% endif %}
           </span>
           <span class="msg-contact-preview">
-            {% if c['last'] %}{{ c['last']['body'][:48] }}{% if c['last']['body']|length > 48 %}…{% endif %}{% else %}Aucun message pour le moment{% endif %}
+            {% if c['last'] %}
+              {% if c['last']['body'] %}{{ c['last']['body'][:48] }}{% if c['last']['body']|length > 48 %}…{% endif %}
+              {% elif c['last']['attachment_filename'] %}📎 Pièce jointe
+              {% endif %}
+            {% else %}Aucun message pour le moment{% endif %}
           </span>
         </a>
         {% endfor %}
@@ -58,7 +62,22 @@
           {% if thread %}
             {% for m in thread %}
               <div class="msg-bubble {{ 'mine' if m['sender_id'] == current_user['id'] else 'theirs' }}">
-                <p>{{ m['body'] }}</p>
+                {% if m['body'] %}<p>{{ m['body'] }}</p>{% endif %}
+                {% if m['attachment_filename'] %}
+                  {% set attachment_url = url_for('uploaded_message_attachment', message_id=m['id'], filename=m['attachment_filename']) %}
+                  <div class="msg-attachment">
+                    {% if m['attachment_type'] == 'image' %}
+                      <a href="{{ attachment_url }}" target="_blank" rel="noopener">
+                        <img src="{{ attachment_url }}" alt="{{ m['attachment_original_name'] }}" class="msg-attachment-img">
+                      </a>
+                    {% else %}
+                      <a href="{{ attachment_url }}" target="_blank" rel="noopener" class="msg-attachment-file">
+                        <span class="msg-attachment-icon">📄</span>
+                        <span class="msg-attachment-name">{{ m['attachment_original_name'] }}</span>
+                      </a>
+                    {% endif %}
+                  </div>
+                {% endif %}
                 <span class="msg-time">{{ m['created_at'] }}</span>
               </div>
             {% endfor %}
@@ -66,9 +85,14 @@
             <p class="slot-empty">Aucun message échangé pour l'instant — dites bonjour !</p>
           {% endif %}
         </div>
-        <form method="post" action="{{ url_for('messagerie_conversation', contact_id=active_contact['id']) }}" class="msg-form">
+        <form method="post" action="{{ url_for('messagerie_conversation', contact_id=active_contact['id']) }}" class="msg-form" enctype="multipart/form-data">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <textarea name="body" rows="2" placeholder="Écrivez votre message…" required></textarea>
+          <textarea name="body" rows="2" placeholder="Écrivez votre message…"></textarea>
+          <label class="msg-attach-btn" title="Joindre une image ou un PDF">
+            📎
+            <input type="file" name="attachment" accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,image/*,application/pdf" style="display:none;" onchange="this.closest('form').querySelector('.msg-attach-name').textContent = this.files[0] ? this.files[0].name : '';">
+          </label>
+          <span class="msg-attach-name"></span>
           <button class="btn btn-gold" type="submit">Envoyer</button>
         </form>
       {% else %}

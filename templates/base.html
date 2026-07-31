@@ -26,6 +26,13 @@
 </ul>
 </li>
 
+<li>
+<span class="tree-group">Informations légales</span>
+<ul>
+<li><a class="tree-link {{ 'active' if request.endpoint=='cgu' else '' }}" href="{{ url_for('cgu') }}"><span class="dot"></span>CGU</a></li>
+</ul>
+</li>
+
 {% if not current_user %}
 <li>
 <span class="tree-group">Authentification</span>
