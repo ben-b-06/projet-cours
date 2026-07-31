@@ -364,11 +364,58 @@ def init_db():
 
     slot_columns = [row[1] for row in db.execute("PRAGMA table_info(slots)").fetchall()]
     if "reserved_by" not in slot_columns:
-        db.execute("ALTER TABLE slots ADD COLUMN reserved_by INTEGER REFERENCES users(id)")
+        # BUG CORRIGÉ : cette colonne était historiquement ajoutée sans clause
+        # ON DELETE, contrairement au schéma de création (CREATE TABLE plus
+        # haut) qui prévoit ON DELETE SET NULL. Résultat : sur les bases
+        # ayant subi cette migration, supprimer un élève ou un professeur
+        # ayant un créneau réservé provoquait une erreur
+        # "FOREIGN KEY constraint failed" (PRAGMA foreign_keys = ON).
+        db.execute("ALTER TABLE slots ADD COLUMN reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL")
     if "student_notes" not in slot_columns:
         db.execute("ALTER TABLE slots ADD COLUMN student_notes TEXT")
     if "slot_mode" not in slot_columns:
         db.execute("ALTER TABLE slots ADD COLUMN slot_mode TEXT")
+
+    # Anciennes bases : la colonne reserved_by a pu être ajoutée par la ligne
+    # ci-dessus AVANT ce correctif, sans clause ON DELETE. SQLite ne permet
+    # pas de modifier une contrainte de clé étrangère en place : on doit donc
+    # reconstruire la table slots si sa définition ne contient pas encore
+    # "ON DELETE SET NULL" pour reserved_by.
+    slots_schema_row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'slots'"
+    ).fetchone()
+    if slots_schema_row and "reserved_by" in slots_schema_row[0] and "reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL" not in slots_schema_row[0]:
+        # Important : on NE renomme PAS `slots` en premier. Depuis SQLite
+        # 3.25, `ALTER TABLE ... RENAME` réécrit automatiquement les FK des
+        # tables qui référencent la table renommée (ex. payments.slot_id) ;
+        # si on part de "slots" → "slots_old", ces FK se retrouvent à
+        # pointer vers "slots_old", qui est ensuite supprimée : la relation
+        # est cassée. On crée donc la nouvelle table sous un autre nom,
+        # on supprime l'ancienne "slots" (les FK des autres tables ne sont
+        # réécrites que lors du RENAME, pas du DROP), puis on renomme la
+        # nouvelle table vers "slots" : les tables enfants, qui référencent
+        # déjà le nom "slots", restent valides.
+        db.executescript(
+            """
+            CREATE TABLE slots_new(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+                slot_date TEXT NOT NULL,
+                slot_time TEXT NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                student_notes TEXT,
+                slot_mode TEXT
+            );
+            INSERT INTO slots_new(
+                id, course_id, slot_date, slot_time, duration_minutes, reserved_by, student_notes, slot_mode
+            )
+            SELECT id, course_id, slot_date, slot_time, duration_minutes, reserved_by, student_notes, slot_mode
+            FROM slots;
+            DROP TABLE slots;
+            ALTER TABLE slots_new RENAME TO slots;
+            """
+        )
 
     course_columns_full = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
     if "mode" not in course_columns_full:
@@ -396,14 +443,23 @@ def init_db():
     # Anciennes bases : la table wallet_transactions existe déjà avec un CHECK
     # qui n'autorise pas encore le type 'withdrawal' (retrait). SQLite ne sait
     # pas modifier un CHECK en place, on reconstruit donc la table.
+    # Important : la table `withdrawals` (créée juste au-dessus dans ce même
+    # init_db) a une clé étrangère vers wallet_transactions(id). On NE
+    # renomme donc PAS wallet_transactions en premier : depuis SQLite 3.25,
+    # `ALTER TABLE ... RENAME` réécrit automatiquement les FK des tables qui
+    # la référencent, ce qui casserait cette relation une fois l'ancienne
+    # table supprimée. On crée la nouvelle table sous un autre nom, on
+    # supprime l'ancienne "wallet_transactions" (le DROP ne déclenche pas
+    # cette réécriture, contrairement au RENAME), puis on renomme la
+    # nouvelle table vers "wallet_transactions" : withdrawals, qui référence
+    # déjà ce nom, reste valide.
     wt_schema_row = db.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wallet_transactions'"
     ).fetchone()
     if wt_schema_row and "withdrawal" not in wt_schema_row[0]:
         db.executescript(
             """
-            ALTER TABLE wallet_transactions RENAME TO wallet_transactions_old;
-            CREATE TABLE wallet_transactions(
+            CREATE TABLE wallet_transactions_new(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 amount_cents INTEGER NOT NULL,
@@ -413,12 +469,13 @@ def init_db():
                 payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
-            INSERT INTO wallet_transactions(
+            INSERT INTO wallet_transactions_new(
                 id, user_id, amount_cents, kind, description, stripe_session_id, payment_id, created_at
             )
             SELECT id, user_id, amount_cents, kind, description, stripe_session_id, payment_id, created_at
-            FROM wallet_transactions_old;
-            DROP TABLE wallet_transactions_old;
+            FROM wallet_transactions;
+            DROP TABLE wallet_transactions;
+            ALTER TABLE wallet_transactions_new RENAME TO wallet_transactions;
             """
         )
 
