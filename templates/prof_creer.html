@@ -13,22 +13,26 @@
 
       <div class="row-fields">
         <div class="field" style="flex:1;">
-          <label>Matière</label>
-          <select name="subject" required>
-            <option value="" disabled {% if not form.get('subject') %}selected{% endif %}>Choisir une matière</option>
+          <label>Matières</label>
+          <div class="multi-choice-grid">
             {% for m in matieres %}
-              <option value="{{ m }}" {% if form.get('subject') == m %}selected{% endif %}>{{ m }}</option>
+              <label class="multi-choice">
+                <input type="checkbox" name="subject" value="{{ m }}" {% if m in selected_subjects %}checked{% endif %}>
+                <span>{{ m }}</span>
+              </label>
             {% endfor %}
-          </select>
+          </div>
         </div>
         <div class="field" style="flex:1;">
-          <label>Niveau scolaire</label>
-          <select name="level" required>
-            <option value="" disabled {% if not form.get('level') %}selected{% endif %}>Choisir un niveau</option>
+          <label>Niveaux scolaires</label>
+          <div class="multi-choice-grid">
             {% for n in niveaux %}
-              <option value="{{ n }}" {% if form.get('level') == n %}selected{% endif %}>{{ n }}</option>
+              <label class="multi-choice">
+                <input type="checkbox" name="level" value="{{ n }}" {% if n in selected_levels %}checked{% endif %}>
+                <span>{{ n }}</span>
+              </label>
             {% endfor %}
-          </select>
+          </div>
         </div>
       </div>
 

@@ -14,7 +14,7 @@
 
 <div class="app-shell">
 <aside class="sidebar" id="sidebar">
-<div class="brand"><span class="brand-mark">◆</span>CoursConnect</div>
+<div class="brand"><span class="brand-mark"></span>CoursConnect</div>
 
 <ul class="tree">
 <li>
@@ -23,13 +23,6 @@
 <li><a class="tree-link {{ 'active' if request.endpoint=='presentation' else '' }}" href="{{ url_for('presentation') }}"><span class="dot"></span>Présentation</a></li>
 <li><a class="tree-link {{ 'active' if request.endpoint=='cours' else '' }}" href="{{ url_for('cours') }}"><span class="dot"></span>Cours disponible ( liste )</a></li>
 <li><a class="tree-link {{ 'active' if request.endpoint=='cours_calendrier' else '' }}" href="{{ url_for('cours_calendrier') }}"><span class="dot"></span>Cours disponible ( calendrier )</a></li>
-</ul>
-</li>
-
-<li>
-<span class="tree-group">Informations légales</span>
-<ul>
-<li><a class="tree-link {{ 'active' if request.endpoint=='cgu' else '' }}" href="{{ url_for('cgu') }}"><span class="dot"></span>CGU</a></li>
 </ul>
 </li>
 
@@ -47,7 +40,7 @@
 <li>
 <span class="tree-group">Professeur</span>
 <ul>
-<li><a class="tree-link {{ 'active' if request.endpoint=='prof_dashboard' else '' }}" href="{{ url_for('prof_dashboard') }}"><span class="dot"></span>Tableau de bord{% if current_user %} ({{ current_user['wallet_cents']|euros }}){% endif %}</a></li>
+<li><a class="tree-link {{ 'active' if request.endpoint=='prof_dashboard' else '' }}" href="{{ url_for('prof_dashboard') }}"><span class="dot"></span>Tableau de bord{% if current_user %} {% endif %}</a></li>
 <li><a class="tree-link {{ 'active' if request.endpoint=='portefeuille' else '' }}" href="{{ url_for('portefeuille') }}"><span class="dot"></span>Mon portefeuille{% if current_user %} ({{ current_user['wallet_cents']|euros }}){% endif %}</a></li>
 <li><a class="tree-link {{ 'active' if request.endpoint=='prof_creer' else '' }}" href="{{ url_for('prof_creer') }}"><span class="dot"></span>Créer un cours</a></li>
 <li><a class="tree-link {{ 'active' if request.endpoint=='prof_profil' else '' }}" href="{{ url_for('prof_profil') }}"><span class="dot"></span>Mon profil</a></li>
@@ -104,6 +97,15 @@
 <a class="btn-ghost-light" href="{{ url_for('connexion') }}">Se connecter</a>
 {% endif %}
 </div>
+
+<ul class="tree">
+<li>
+<span class="tree-group">Informations légales</span>
+<ul>
+<li><a class="tree-link {{ 'active' if request.endpoint=='cgu' else '' }}" href="{{ url_for('cgu') }}"><span class="dot"></span>CGU</a></li>
+</ul>
+</li>
+</ul>
 </aside>
 
 <main class="content">

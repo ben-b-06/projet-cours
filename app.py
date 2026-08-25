@@ -1,13 +1,3 @@
-"""
-CoursConnect — plateforme de cours en ligne (version Python / Flask + SQLite)
-
-Lancer :
-    pip install -r requirements.txt
-    python app.py
-
-Puis ouvrir http://127.0.0.1:5000
-"""
-
 import os
 import json
 import secrets
@@ -39,13 +29,7 @@ MAX_MESSAGE_ATTACHMENT_SIZE = 8 * 1024 * 1024  # 8 Mo max par pièce jointe
 
 app = Flask(__name__)
 
-# FAILLE CORRIGÉE : la clé secrète était codée en dur dans le code source
-# (visible publiquement sur GitHub), ce qui permet de forger des cookies de
-# session (usurpation d'identité, y compris admin). Elle doit désormais être
-# fournie via la variable d'environnement FLASK_SECRET_KEY. En son absence,
-# une clé aléatoire est générée à chaque démarrage : cela reste utilisable en
-# développement local mais invalide les sessions à chaque redémarrage, ce qui
-# force à configurer correctement la variable en production.
+
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
 if not os.environ.get("FLASK_SECRET_KEY"):
     print(
@@ -1053,11 +1037,11 @@ def build_course_query(filters):
         params.extend([like, like])
 
     if filters["subject"] in MATIERES:
-        conditions.append("c.subject = ?")
+        conditions.append("INSTR(',' || REPLACE(c.subject, ', ', ',') || ',', ',' || ? || ',') > 0")
         params.append(filters["subject"])
 
     if filters["level"] in NIVEAUX:
-        conditions.append("c.level = ?")
+        conditions.append("INSTR(',' || REPLACE(c.level, ', ', ',') || ',', ',' || ? || ',') > 0")
         params.append(filters["level"])
 
     if filters["mode"] == "en_ligne":
@@ -1759,8 +1743,8 @@ def prof_creer():
 
     if request.method == "POST":
         title = request.form.get("title", "").strip()
-        subject = request.form.get("subject", "")
-        level = request.form.get("level", "")
+        subjects = request.form.getlist("subject")
+        levels = request.form.getlist("level")
         description = request.form.get("description", "").strip()
         mode = request.form.get("mode", "")
         city = request.form.get("city", "").strip()
@@ -1773,10 +1757,10 @@ def prof_creer():
         errors = []
         if not title:
             errors.append("Merci de renseigner un titre.")
-        if subject not in MATIERES:
-            errors.append("Merci de choisir une matière dans la liste proposée.")
-        if level not in NIVEAUX:
-            errors.append("Merci de choisir un niveau scolaire dans la liste proposée.")
+        if not subjects or any(subject not in MATIERES for subject in subjects):
+            errors.append("Merci de choisir au moins une matière dans la liste proposée.")
+        if not levels or any(level not in NIVEAUX for level in levels):
+            errors.append("Merci de choisir au moins un niveau scolaire dans la liste proposée.")
         if not description:
             errors.append("Merci de renseigner une description.")
         if mode not in MODES:
@@ -1825,13 +1809,15 @@ def prof_creer():
                 niveaux=NIVEAUX,
                 modes=MODES,
                 mode_labels=MODE_LABELS,
+                selected_subjects=subjects,
+                selected_levels=levels,
                 form=request.form,
             )
 
         db = get_db()
         cur = db.execute(
             "INSERT INTO courses(title, subject, level, description, teacher_id, mode, city, price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (title, subject, level, description, current_user()["id"], mode, city or None, price_cents),
+            (title, ", ".join(subjects), ", ".join(levels), description, current_user()["id"], mode, city or None, price_cents),
         )
         course_id = cur.lastrowid
         for date_val, time_val, duration in slots:
@@ -1844,7 +1830,8 @@ def prof_creer():
         return redirect(url_for("prof_dashboard"))
 
     return render_template(
-        "prof_creer.html", matieres=MATIERES, niveaux=NIVEAUX, modes=MODES, mode_labels=MODE_LABELS, form={}
+        "prof_creer.html", matieres=MATIERES, niveaux=NIVEAUX, modes=MODES,
+        mode_labels=MODE_LABELS, selected_subjects=[], selected_levels=[], form={}
     )
 
 
