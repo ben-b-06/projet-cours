@@ -175,7 +175,8 @@ def init_db():
             role TEXT NOT NULL CHECK(role IN ('admin', 'prof', 'etudiant')),
             bio TEXT,
             photo TEXT,
-            approved INTEGER NOT NULL DEFAULT 1
+            approved INTEGER NOT NULL DEFAULT 1,
+            stripe_account_id TEXT
         );
 
         CREATE TABLE IF NOT EXISTS courses(
@@ -287,6 +288,7 @@ def init_db():
             status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'paid', 'rejected')),
             admin_note TEXT,
             wallet_transaction_id INTEGER REFERENCES wallet_transactions(id) ON DELETE SET NULL,
+            stripe_transfer_id TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             resolved_at TEXT
         );
@@ -345,6 +347,8 @@ def init_db():
         # bien pour créditer un élève (recharge Stripe) que pour créditer un
         # professeur (versement d'un cours confirmé/libéré automatiquement).
         db.execute("ALTER TABLE users ADD COLUMN wallet_cents INTEGER NOT NULL DEFAULT 0")
+    if "stripe_account_id" not in user_columns:
+        db.execute("ALTER TABLE users ADD COLUMN stripe_account_id TEXT")
 
     payment_columns = [row[1] for row in db.execute("PRAGMA table_info(payments)").fetchall()]
     if "teacher_amount_cents" not in payment_columns:
@@ -508,18 +512,23 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'paid', 'rejected')),
                 admin_note TEXT,
                 wallet_transaction_id INTEGER REFERENCES wallet_transactions(id) ON DELETE SET NULL,
+                stripe_transfer_id TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 resolved_at TEXT
             );
             INSERT INTO withdrawals_new(
-                id, user_id, amount_cents, method, details, status, admin_note, wallet_transaction_id, created_at, resolved_at
+                id, user_id, amount_cents, method, details, status, admin_note, wallet_transaction_id, stripe_transfer_id, created_at, resolved_at
             )
-            SELECT id, user_id, amount_cents, method, details, status, admin_note, wallet_transaction_id, created_at, resolved_at
+            SELECT id, user_id, amount_cents, method, details, status, admin_note, wallet_transaction_id, NULL, created_at, resolved_at
             FROM withdrawals;
             DROP TABLE withdrawals;
             ALTER TABLE withdrawals_new RENAME TO withdrawals;
             """
         )
+
+    withdrawal_columns = [row[1] for row in db.execute("PRAGMA table_info(withdrawals)").fetchall()]
+    if "stripe_transfer_id" not in withdrawal_columns:
+        db.execute("ALTER TABLE withdrawals ADD COLUMN stripe_transfer_id TEXT")
 
     os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
 
@@ -707,11 +716,45 @@ def credit_wallet(db, user_id, amount_cents, kind, description=None, stripe_sess
 WITHDRAWAL_METHODS = {
     "virement": "Virement bancaire (IBAN)",
     "especes": "Retrait en espèces (à convenir avec l'administration)",
+    "stripe": "Versement bancaire via Stripe Connect",
 }
 
 
 class WithdrawalError(Exception):
     pass
+
+
+def get_or_create_stripe_account(db, user):
+    """Crée un compte Connect Express pour recevoir des versements."""
+    if not STRIPE_SECRET_KEY:
+        raise WithdrawalError("Stripe n'est pas configuré sur ce serveur.")
+    if user["stripe_account_id"]:
+        return user["stripe_account_id"]
+    try:
+        account = stripe.Account.create(
+            type="express",
+            country="FR",
+            email=user["email"],
+            capabilities={"transfers": {"requested": True}},
+            metadata={"coursconnect_user_id": str(user["id"])},
+        )
+    except Exception as exc:
+        raise WithdrawalError(f"Impossible de créer le compte Stripe Connect : {exc}") from exc
+    db.execute("UPDATE users SET stripe_account_id = ? WHERE id = ?", (account.id, user["id"]))
+    return account.id
+
+
+def create_stripe_onboarding_link(db, user):
+    account_id = get_or_create_stripe_account(db, user)
+    try:
+        return stripe.AccountLink.create(
+            account=account_id,
+            type="account_onboarding",
+            refresh_url=url_for("portefeuille_connect_onboarding", _external=True),
+            return_url=url_for("portefeuille_connect_return", _external=True),
+        )
+    except Exception as exc:
+        raise WithdrawalError(f"Impossible de démarrer la vérification Stripe : {exc}") from exc
 
 
 def request_withdrawal(db, user, amount_cents, method, details):
@@ -724,7 +767,7 @@ def request_withdrawal(db, user, amount_cents, method, details):
         raise WithdrawalError("Solde insuffisant pour ce retrait.")
     if method not in WITHDRAWAL_METHODS:
         raise WithdrawalError("Moyen de retrait invalide.")
-    if not details or not details.strip():
+    if method != "stripe" and (not details or not details.strip()):
         raise WithdrawalError("Merci de préciser vos coordonnées pour le versement (IBAN, etc.).")
 
     wt_id = credit_wallet(
@@ -736,7 +779,7 @@ def request_withdrawal(db, user, amount_cents, method, details):
         INSERT INTO withdrawals(user_id, amount_cents, method, details, wallet_transaction_id)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (user["id"], amount_cents, method, details.strip(), wt_id),
+        (user["id"], amount_cents, method, (details or "").strip(), wt_id),
     )
     return cur.lastrowid
 
@@ -1306,6 +1349,7 @@ def portefeuille():
         topup_amounts=WALLET_TOPUP_AMOUNTS,
         withdrawal_methods=WITHDRAWAL_METHODS,
         stripe_configured=bool(STRIPE_SECRET_KEY),
+        stripe_connect_ready=bool(user["stripe_account_id"]),
     )
 
 
@@ -1330,18 +1374,64 @@ def portefeuille_retirer():
     amount_cents = round(amount_euros * 100)
 
     try:
-        request_withdrawal(db, user, amount_cents, method, details)
+        if method == "stripe":
+            if user["role"] not in ("prof", "etudiant"):
+                raise WithdrawalError("Le versement Stripe est réservé aux professeurs et aux élèves.")
+            if not user["stripe_account_id"]:
+                raise WithdrawalError("Configurez d'abord votre compte bancaire Stripe Connect.")
+        withdrawal_id = request_withdrawal(db, user, amount_cents, method, details)
+        if method == "stripe":
+            transfer = stripe.Transfer.create(
+                amount=amount_cents,
+                currency="eur",
+                destination=user["stripe_account_id"],
+                description=f"Retrait CoursConnect #{withdrawal_id}",
+                metadata={"coursconnect_withdrawal_id": str(withdrawal_id), "user_id": str(user["id"])},
+                idempotency_key=f"coursconnect-withdrawal-{withdrawal_id}",
+            )
+            db.execute(
+                "UPDATE withdrawals SET status = 'paid', stripe_transfer_id = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (transfer.id, withdrawal_id),
+            )
     except WithdrawalError as exc:
         db.rollback()
         flash(str(exc), "error")
         return redirect(url_for("portefeuille"))
+    except Exception as exc:
+        db.rollback()
+        flash(f"Le versement Stripe n'a pas pu être lancé : {exc}", "error")
+        return redirect(url_for("portefeuille"))
 
     db.commit()
-    flash(
-        f"Demande de retrait de {euros(amount_cents)} envoyée. "
-        "Elle sera traitée par un administrateur.",
-        "success",
-    )
+    if method == "stripe":
+        flash(f"Versement de {euros(amount_cents)} lancé via Stripe Connect. Les délais bancaires de Stripe s'appliquent.", "success")
+    else:
+        flash(f"Demande de retrait de {euros(amount_cents)} envoyée. Elle sera traitée par un administrateur.", "success")
+    return redirect(url_for("portefeuille"))
+
+
+@app.route("/portefeuille/connect/onboarding")
+@login_required()
+def portefeuille_connect_onboarding():
+    user = current_user()
+    if user["role"] not in ("prof", "etudiant"):
+        flash("Stripe Connect est réservé aux professeurs et aux élèves.", "error")
+        return redirect(url_for("portefeuille"))
+    db = get_db()
+    try:
+        link = create_stripe_onboarding_link(db, user)
+        db.commit()
+    except WithdrawalError as exc:
+        db.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("portefeuille"))
+    return redirect(link.url, code=303)
+
+
+@app.route("/portefeuille/connect/retour")
+@login_required()
+def portefeuille_connect_return():
+    flash("Votre compte Stripe Connect a été enregistré. Stripe peut encore demander des informations complémentaires avant le premier versement.", "success")
     return redirect(url_for("portefeuille"))
 
 

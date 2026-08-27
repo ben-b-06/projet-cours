@@ -79,6 +79,11 @@ CoursConnect intègre un système de paiement complet :
   un thread d'arrière-plan (`start_auto_release_background_thread`, vérification chaque
   minute) verse automatiquement le professeur.
 - Si l'élève annule un créneau **avant** le cours, il est remboursé automatiquement.
+- **Versements réels** : depuis « Mon portefeuille », un professeur ou un élève peut
+  configurer son compte bancaire avec **Stripe Connect Express**, puis retirer son solde.
+  Le retrait crée un transfert Stripe vers le compte Connect ; Stripe effectue ensuite le
+  versement bancaire selon ses délais et contrôles habituels. Les retraits manuels restent
+  disponibles pour les comptes non Connect.
 
 ### Configuration Stripe
 
@@ -95,6 +100,11 @@ export STRIPE_WEBHOOK_SECRET="whsec_..."     # Dashboard Stripe > Webhooks > vot
 Sans `STRIPE_SECRET_KEY`, la page « Mon portefeuille » reste accessible mais la recharge par
 carte est désactivée (message explicatif affiché).
 
+Pour activer les versements Connect, le même compte Stripe doit être configuré. Chaque
+utilisateur renseigne ses informations d'identité et son compte bancaire dans le parcours
+Stripe Connect depuis « Mon portefeuille » ; les coordonnées bancaires ne sont jamais
+stockées par CoursConnect.
+
 Pour recevoir les webhooks en local, utiliser le CLI Stripe :
 
 ```bash
@@ -108,10 +118,9 @@ portefeuille même si l'élève ferme son navigateur avant la redirection vers
 
 ### Limites connues / pistes d'évolution
 
-- Le « paiement » du professeur crédite un **portefeuille interne** (solde visible dans son
-  tableau de bord), pas un virement bancaire réel. Pour verser réellement de l'argent sur le
-  compte bancaire d'un professeur, il faudrait intégrer **Stripe Connect** (comptes connectés,
-  vérification d'identité KYC, virements). C'est une extension plus lourde, non incluse ici.
+- Le solde affiché dans CoursConnect reste un **portefeuille interne**. Le retrait Stripe
+  transfère le montant vers le compte Connect de l'utilisateur, puis Stripe le verse sur son
+  compte bancaire selon le calendrier de paiement configuré.
 - Le remboursement est **automatique et immédiat** dès que l'élève le demande (pas de
   processus d'arbitrage/litige avec le professeur ou l'administrateur).
 - Le thread de libération automatique fonctionne pour un déploiement mono-processus
