@@ -7,15 +7,15 @@ créé automatiquement au premier lancement).
 ## Installation
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate        # sous Windows : venv\Scripts\activate
+py -m venv venv
+venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 ## Lancement
 
 ```bash
-python app.py
+py app.py
 ```
 
 Puis ouvrir **http://127.0.0.1:5000** dans un navigateur.
