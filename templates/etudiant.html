@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as macros %}
 {% block content %}
   <span class="eyebrow">Étudiant / Mes cours</span>
   <div class="row-between" style="margin-bottom:1.6rem;">
@@ -17,9 +18,9 @@
         <li>
           <span class="slot-date">{{ r['slot_date'] }}</span> · {{ r['slot_time'] }} · {{ r['duration_minutes']|duree_lisible }}
           {% if r['slot_mode'] == 'en_ligne' %}
-            <span class="slot-status">🎥 En ligne</span>
+            <span class="slot-status">{{ macros.icon('video') }} En ligne</span>
           {% else %}
-            <span class="slot-status">📍 Présentiel{{ ' · ' + r['course_city'] if r['course_city'] else '' }}</span>
+            <span class="slot-status">{{ macros.icon('pin') }} Présentiel{{ ' · ' + r['course_city'] if r['course_city'] else '' }}</span>
           {% endif %}
         </li>
       </ul>
@@ -43,7 +44,7 @@
               <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
                 <form method="post" action="{{ url_for('confirmer_paiement', payment_id=r['payment_id']) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                  <button class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" type="submit">✅ Confirmer que le cours s'est bien passé</button>
+                  <button class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" type="submit">{{ macros.icon('check') }} Confirmer que le cours s'est bien passé</button>
                 </form>
                 <form method="post" action="{{ url_for('rembourser_paiement', payment_id=r['payment_id']) }}" onsubmit="return confirm('Demander un remboursement pour ce cours ?');">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -52,7 +53,7 @@
               </div>
             {% endif %}
           {% elif r['payment_status'] == 'released' %}
-            <span style="color:var(--sage,#5a7d5a);">✅ Paiement de {{ r['payment_amount_cents']|euros }} versé au professeur.</span>
+            <span style="color:var(--sage,#5a7d5a);">{{ macros.icon('check') }} Paiement de {{ r['payment_amount_cents']|euros }} versé au professeur.</span>
           {% elif r['payment_status'] == 'refunded' %}
             <span>↩️ Remboursé : {{ r['payment_amount_cents']|euros }} recrédités sur votre portefeuille.</span>
           {% endif %}
@@ -60,14 +61,14 @@
       {% endif %}
 
       {% if r['payment_id'] and seance_terminee(r) %}
-        <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;align-self:flex-start;" href="{{ url_for('telecharger_facture', slot_id=r['id']) }}">🧾 Télécharger la facture (PDF)</a>
+        <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;align-self:flex-start;" href="{{ url_for('telecharger_facture', slot_id=r['id']) }}">{{ macros.icon('receipt') }} Télécharger la facture (PDF)</a>
       {% endif %}
 
       <div class="course-meta">
         <span>Par {{ r['teacher_name'] }}</span>
         <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('messagerie_conversation', contact_id=r['teacher_id']) }}">Écrire au prof</a>
         {% if r['slot_mode'] == 'en_ligne' %}
-          <a class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('visio', course_id=r['course_id'], slot_id=r['id']) }}">🎥 Visioconférence</a>
+          <a class="btn btn-sage" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('visio', course_id=r['course_id'], slot_id=r['id']) }}">{{ macros.icon('video') }} Visioconférence</a>
         {% endif %}
         <form method="post" action="{{ url_for('desinscription_cours', course_id=r['course_id'], slot_id=r['id']) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">

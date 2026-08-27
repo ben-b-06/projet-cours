@@ -13,8 +13,8 @@
 
   <div class="row-between" style="margin-bottom:1rem;flex-wrap:wrap;gap:0.6rem;">
     <div style="display:flex;gap:0.5rem;">
-      <a class="btn btn-gold" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours', **filters) }}">☰ Liste</a>
-      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours_calendrier', **filters) }}">📅 Calendrier</a>
+      <a class="btn btn-gold" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours', **filters) }}">{{ macros.icon('list') }} Liste</a>
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours_calendrier', **filters) }}">{{ macros.icon('calendar') }} Calendrier</a>
     </div>
   </div>
 
@@ -86,9 +86,9 @@
       <h3>{{ c['title'] }} <span style="font-size:0.85rem;color:var(--gold,#b8860b);font-weight:600;">— {{ c['price_cents']|euros }} / séance</span></h3>
       <p class="course-desc">{{ c['description'] }}</p>
       <p style="font-size:0.8rem;color:var(--text-muted);margin:-0.4rem 0 0.6rem;">
-        {% if c['mode'] == 'en_ligne' %}🎥 En ligne
-        {% elif c['mode'] == 'presentiel' %}📍 En présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
-        {% else %}🎥📍 En ligne ou en présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
+        {% if c['mode'] == 'en_ligne' %}{{ macros.icon('video') }} En ligne
+        {% elif c['mode'] == 'presentiel' %}{{ macros.icon('pin') }} En présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
+        {% else %}{{ macros.icon('video') }}{{ macros.icon('pin') }} En ligne ou en présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
         {% endif %}
       </p>
 
@@ -128,8 +128,8 @@
                     <span class="slot-status slot-status-reserved">Complet</span>
                   {% elif c['mode'] == 'les_deux' %}
                     <select name="slot_mode_{{ s['id'] }}" style="margin-left:0.5rem;font-size:0.78rem;">
-                      <option value="en_ligne">🎥 En ligne</option>
-                      <option value="presentiel">📍 En présentiel{{ ' (' + c['city'] + ')' if c['city'] else '' }}</option>
+                      <option value="en_ligne">En ligne</option>
+                      <option value="presentiel">En présentiel{{ ' (' + c['city'] + ')' if c['city'] else '' }}</option>
                     </select>
                   {% endif %}
                 </label>

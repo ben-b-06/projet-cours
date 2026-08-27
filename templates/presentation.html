@@ -2,18 +2,23 @@
 {% block content %}
   <section class="hero">
     <span class="eyebrow">la communauté du savoir · plateforme de cours en ligne</span>
-    <h1>Cours particuliers avec des étudiants, en présentiel ou à distance.</h1>
-    <p class="lead">La communauté du savoir est une plateforme créée par 3 étudiants qui souhaitent partager leurs connaissances et aider d'autres étudiants à réussir. Nous mettons en relation des étudiants qui souhaitent donner des cours particuliers avec d'autres étudiants qui souhaitent apprendre.</p>
-    <p class="lead">Notre objectif est de créer une plateforme de cours en ligne ou en présentiel.</p>
-    <p class="lead">Nous proposons des cours particuliers dans différentes matières
-, allant des mathématiques à la physique, en passant par la chimie, la biologie, l'informatique et bien d'autres. Nos étudiants sont des passionnés qui souhaitent partager leur savoir et aider les autres à réussir.</p>
-    </p>
+    <h1>Des cours particuliers donnés par des étudiants, en présentiel ou à distance.</h1>
+    <p class="lead">La communauté du savoir met en relation des étudiants qui souhaitent transmettre ce qu'ils maîtrisent avec d'autres qui cherchent à progresser — en mathématiques, physique, chimie, biologie, informatique et bien d'autres matières.</p>
+    <p class="lead">Le projet est né de l'initiative de trois étudiants convaincus qu'apprendre auprès d'un pair, proche en âge et en expérience, change souvent la donne.</p>
 
+    <div class="flow">
+      <span class="flow-node"><span class="dot"></span>Choisir un cours</span>
+      <span class="flow-line"></span>
+      <span class="flow-node mid"><span class="dot"></span>Réserver un créneau</span>
+      <span class="flow-line"></span>
+      <span class="flow-node"><span class="dot"></span>Suivre la séance</span>
+    </div>
   </section>
 
-
-
-  <div style="margin-top:2.2rem;">
+  <div class="row-between" style="gap:0.8rem;flex-wrap:wrap;">
     <a class="btn btn-gold" href="{{ url_for('cours') }}">Voir la liste des cours</a>
+    {% if not current_user %}
+    <a class="btn btn-outline" href="{{ url_for('inscription') }}">Créer un compte</a>
+    {% endif %}
   </div>
 {% endblock %}

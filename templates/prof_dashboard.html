@@ -5,7 +5,7 @@
 
   {% if not current_user['approved'] %}
   <div class="empty-state" style="border:1px solid var(--gold, #c9a227);margin-bottom:1.4rem;text-align:left;">
-    ⏳ Votre compte est en attente de validation par l'administrateur. Votre profil et vos cours
+    Votre compte est en attente de validation par l'administrateur. Votre profil et vos cours
     ne seront visibles publiquement, et la création de cours ne sera possible, qu'une fois votre
     profil validé.
   </div>
@@ -62,25 +62,25 @@
       <h3>{{ c['title'] }} <span style="font-size:0.85rem;color:var(--gold,#b8860b);font-weight:600;">— {{ c['price_cents']|euros }} / séance</span></h3>
       <p class="course-desc">{{ c['description'] }}</p>
       <p style="font-size:0.8rem;color:var(--text-muted);margin:-0.4rem 0 0.6rem;">
-        {% if c['mode'] == 'en_ligne' %}🎥 En ligne
-        {% elif c['mode'] == 'presentiel' %}📍 En présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
-        {% else %}🎥📍 En ligne ou en présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
+        {% if c['mode'] == 'en_ligne' %}{{ macros.icon('video') }} En ligne
+        {% elif c['mode'] == 'presentiel' %}{{ macros.icon('pin') }} En présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
+        {% else %}{{ macros.icon('video') }}{{ macros.icon('pin') }} En ligne ou en présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
         {% endif %}
       </p>
       {{ macros.slot_list(course_slots) }}
 
       {% for s in course_slots if s['reserved_by'] %}
         <div class="slot-contact-row">
-          <span class="badge-enrolled">{{ s['slot_date'] }} {{ s['slot_time'] }} · {{ s['student_name'] }} · {{ '🎥 En ligne' if s['slot_mode'] == 'en_ligne' else '📍 Présentiel' }}</span>
+          <span class="badge-enrolled">{{ s['slot_date'] }} {{ s['slot_time'] }} · {{ s['student_name'] }} · {{ macros.icon('video') if s['slot_mode'] == 'en_ligne' else macros.icon('pin') }} {{ 'En ligne' if s['slot_mode'] == 'en_ligne' else 'Présentiel' }}</span>
           {% if s['student_notes'] %}
             <span class="mono" style="font-size:0.76rem;color:var(--text-muted);">{{ s['student_notes'] }}</span>
           {% endif %}
           <a class="btn btn-outline" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('messagerie_conversation', contact_id=s['reserved_by']) }}">Écrire à l'élève</a>
           {% if s['slot_mode'] == 'en_ligne' %}
-            <a class="btn btn-sage" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('visio', course_id=c['id'], slot_id=s['id']) }}">🎥 Visio</a>
+            <a class="btn btn-sage" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('visio', course_id=c['id'], slot_id=s['id']) }}">{{ macros.icon('video') }} Visio</a>
           {% endif %}
           {% if c['price_cents'] and seance_terminee(s) %}
-            <a class="btn btn-outline" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('telecharger_facture', slot_id=s['id']) }}">🧾 Facture</a>
+            <a class="btn btn-outline" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('telecharger_facture', slot_id=s['id']) }}">{{ macros.icon('receipt') }} Facture</a>
           {% endif %}
         </div>
       {% endfor %}

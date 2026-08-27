@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import secrets
 import threading
@@ -48,6 +49,11 @@ if not os.environ.get("FLASK_SECRET_KEY"):
 
 app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 Mo max (photos de profil et pièces jointes de messagerie)
 
+# Durée de vie maximale d'une session : même si l'utilisateur reste actif,
+# le cookie de session expire au bout de 12h et il faut se reconnecter.
+# Limite l'impact d'un cookie de session volé (XSS, poste partagé oublié…).
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=12)
+
 # FAILLE CORRIGÉE : durcissement des cookies de session.
 # - HTTPONLY : empêche JavaScript (donc une éventuelle injection XSS) de lire le cookie de session.
 # - SAMESITE=Lax : limite l'envoi du cookie sur des requêtes cross-site (protection CSRF de base).
@@ -71,7 +77,68 @@ def set_security_headers(response):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()")
+    # Politique de sécurité du contenu : limite les origines autorisées à charger
+    # des scripts/styles/images/polices, interdit les plugins (object-src) et le
+    # chargement de la page dans un <iframe> tiers (frame-ancestors). Les scripts
+    # et styles restent en 'unsafe-inline' car quelques templates utilisent encore
+    # des attributs on* / style="" en ligne — à terme, les migrer vers un nonce
+    # CSP permettrait de retirer 'unsafe-inline' de script-src.
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none';",
+    )
+    # HSTS : n'a de sens que si le site est effectivement servi en HTTPS
+    # (FORCE_HTTPS=1) ; l'activer sans HTTPS casserait l'accès en clair.
+    if app.config["SESSION_COOKIE_SECURE"]:
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+        )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Limitation de débit (anti brute-force / anti-spam) — implémentation simple
+# en mémoire, par IP. Suffisant pour se protéger d'un bourrinage automatisé
+# basique ; pour un déploiement multi-workers/multi-serveurs en production,
+# préférer un stockage partagé (ex. Flask-Limiter + Redis).
+# ---------------------------------------------------------------------------
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets = {}
+
+
+def _client_ip():
+    return request.remote_addr or "unknown"
+
+
+def is_rate_limited(key, max_attempts, window_seconds):
+    """Renvoie True si la clé donnée a dépassé max_attempts sur la fenêtre
+    glissante window_seconds (et enregistre la tentative courante sinon)."""
+    now = time_mod.time()
+    cutoff = now - window_seconds
+    with _rate_limit_lock:
+        bucket = _rate_limit_buckets.setdefault(key, [])
+        while bucket and bucket[0] < cutoff:
+            bucket.pop(0)
+        if len(bucket) >= max_attempts:
+            return True
+        bucket.append(now)
+        # Purge occasionnelle des clés inactives pour éviter une fuite mémoire.
+        if len(_rate_limit_buckets) > 5000:
+            stale = [k for k, v in _rate_limit_buckets.items() if not v or v[-1] < cutoff]
+            for k in stale:
+                _rate_limit_buckets.pop(k, None)
+        return False
+
 
 # Choix fermés pour la matière et le niveau scolaire (du collège au lycée)
 MATIERES = ["Mathématiques", "Physique-Chimie","SI", "Français", "SVT", "SES", "Histoire-Géographie"]
@@ -1753,14 +1820,23 @@ def telecharger_facture(slot_id):
 # ---------------------------------------------------------------------------
 # Routes — Authentification
 # ---------------------------------------------------------------------------
+MAX_PASSWORD_LENGTH = 128
+
+
 @app.route("/connexion", methods=["GET", "POST"])
 def connexion():
     if request.method == "POST":
+        if is_rate_limited(f"login:{_client_ip()}", max_attempts=10, window_seconds=300):
+            flash("Trop de tentatives de connexion depuis cette adresse. Réessayez dans quelques minutes.", "error")
+            return render_template("connexion.html"), 429
+
         email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
         user = get_db().execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-        if user and check_password_hash(user["password_hash"], password):
+        if user and len(password) <= MAX_PASSWORD_LENGTH and check_password_hash(user["password_hash"], password):
+            session.clear()
             session["user_id"] = user["id"]
+            session.permanent = True
             flash(f"Bienvenue, {user['name']} !", "success")
             return redirect(dashboard_url_for(user["role"]))
         flash("E-mail ou mot de passe incorrect.", "error")
@@ -1788,7 +1864,9 @@ def connexion_demo(role):
     email = DEMO_EMAILS.get(role)
     user = get_db().execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone() if email else None
     if user:
+        session.clear()
         session["user_id"] = user["id"]
+        session.permanent = True
         flash(f"Connecté(e) en tant que {user['name']}.", "success")
         return redirect(dashboard_url_for(user["role"]))
     return redirect(url_for("connexion"))
@@ -1826,6 +1904,10 @@ def inscription():
     registration_mode = get_registration_mode()
 
     if request.method == "POST":
+        if is_rate_limited(f"signup:{_client_ip()}", max_attempts=8, window_seconds=3600):
+            flash("Trop de tentatives d'inscription depuis cette adresse. Réessayez plus tard.", "error")
+            return render_template("inscription.html", registration_mode=registration_mode), 429
+
         name = request.form.get("name", "").strip()
         email = request.form.get("email", "").strip().lower()
         password = request.form.get("password", "")
@@ -1839,8 +1921,13 @@ def inscription():
             flash("Les inscriptions sont actuellement réservées aux professeurs.", "error")
             return render_template("inscription.html", registration_mode=registration_mode)
 
-        if not name or not email or len(password) < 8:
-            flash("Merci de renseigner un nom, un e-mail et un mot de passe d'au moins 8 caractères.", "error")
+        email_valid = bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email))
+        if not name or not email_valid or not (8 <= len(password) <= MAX_PASSWORD_LENGTH):
+            flash(
+                "Merci de renseigner un nom, une adresse e-mail valide et un mot de passe "
+                f"entre 8 et {MAX_PASSWORD_LENGTH} caractères.",
+                "error",
+            )
             return render_template("inscription.html", registration_mode=registration_mode)
 
         db = get_db()
@@ -1857,7 +1944,9 @@ def inscription():
             (name, email, generate_password_hash(password), role, approved),
         )
         db.commit()
+        session.clear()
         session["user_id"] = cur.lastrowid
+        session.permanent = True
         if role == "prof":
             flash(
                 f"Compte créé, bienvenue {name} ! Votre profil est en attente de validation par "
@@ -3034,6 +3123,10 @@ def visio_chat_recevoir(course_id, slot_id):
 def parametres():
     user = current_user()
     if request.method == "POST":
+        if is_rate_limited(f"pwdchange:{user['id']}", max_attempts=10, window_seconds=600):
+            flash("Trop de tentatives. Réessayez dans quelques minutes.", "error")
+            return render_template("parametres.html", user=user), 429
+
         current_password = request.form.get("current_password", "")
         new_password = request.form.get("new_password", "")
         confirm_password = request.form.get("confirm_password", "")
@@ -3041,8 +3134,8 @@ def parametres():
         if not check_password_hash(user["password_hash"], current_password):
             flash("Mot de passe actuel incorrect.", "error")
             return render_template("parametres.html", user=user)
-        if len(new_password) < 8:
-            flash("Le nouveau mot de passe doit contenir au moins 8 caractères.", "error")
+        if not (8 <= len(new_password) <= MAX_PASSWORD_LENGTH):
+            flash(f"Le nouveau mot de passe doit contenir entre 8 et {MAX_PASSWORD_LENGTH} caractères.", "error")
             return render_template("parametres.html", user=user)
         if new_password != confirm_password:
             flash("Les deux mots de passe saisis ne correspondent pas.", "error")

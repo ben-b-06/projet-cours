@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as macros %}
 {% block content %}
   <div class="section-title">
     <div>
@@ -12,8 +13,8 @@
 
   <div class="row-between" style="margin-bottom:1rem;flex-wrap:wrap;gap:0.6rem;">
     <div style="display:flex;gap:0.5rem;">
-      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours', **filters) }}">☰ Liste</a>
-      <a class="btn btn-gold" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours_calendrier', **filters) }}">📅 Calendrier</a>
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours', **filters) }}">{{ macros.icon('list') }} Liste</a>
+      <a class="btn btn-gold" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours_calendrier', **filters) }}">{{ macros.icon('calendar') }} Calendrier</a>
     </div>
   </div>
 
@@ -78,9 +79,9 @@
   <div class="row-between" style="margin-bottom:1.4rem;">
     <h2 style="font-size:1.5rem;margin:0;">{{ month_label }}</h2>
     <div style="display:flex;gap:0.5rem;">
-      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ prev_link }}">← Précédent</a>
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ prev_link }}">{{ macros.icon('arrow-left') }} Précédent</a>
       <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ today_link }}">Aujourd'hui</a>
-      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ next_link }}">Suivant →</a>
+      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ next_link }}">Suivant {{ macros.icon('arrow-right') }}</a>
     </div>
   </div>
 

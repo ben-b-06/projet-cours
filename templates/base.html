@@ -9,8 +9,9 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
+{% from '_macros.html' import icon %}
 
-<button class="mobile-toggle" id="mobileToggle">☰ Menu</button>
+<button class="mobile-toggle" id="mobileToggle">{{ icon('menu') }} Menu</button>
 
 <div class="app-shell">
 <aside class="sidebar" id="sidebar">

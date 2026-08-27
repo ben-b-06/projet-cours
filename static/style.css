@@ -660,6 +660,9 @@ label{font-size:0.83rem;font-weight:600;color:var(--text-muted);display:block;ma
   .msg-shell{grid-template-columns:1fr;}
 }
 
+.icon-inline{vertical-align:-2px;margin-right:0.32rem;flex-shrink:0;}
+.btn .icon-inline{margin-right:0.4rem;}
+
 @media (prefers-reduced-motion: reduce){
   *{transition:none !important;}
 }
