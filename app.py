@@ -6,12 +6,19 @@ import time as time_mod
 import calendar as calendar_mod
 from datetime import date, datetime, timedelta
 from functools import wraps
+from io import BytesIO
 import sqlite3
 
 import stripe
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify, send_from_directory
+from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify, send_from_directory, send_file, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_wtf import CSRFProtect
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_RIGHT
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = "/var/data"
@@ -882,6 +889,93 @@ def refund_payment(db, payment):
     )
 
 
+INVOICE_SELLER_NAME = "CoursConnect"
+INVOICE_SELLER_NOTE = "Plateforme de mise en relation entre professeurs particuliers et élèves."
+
+
+def generate_invoice_pdf(payment, slot, course, student, teacher):
+    """Génère la facture PDF (en mémoire) d'une séance de cours payée.
+    `payment`, `slot`, `course`, `student` et `teacher` sont des sqlite3.Row.
+    Renvoie un buffer BytesIO positionné au début, prêt à être envoyé."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        topMargin=22 * mm, bottomMargin=22 * mm, leftMargin=20 * mm, rightMargin=20 * mm,
+        title=f"Facture CoursConnect #{payment['id']}",
+    )
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("InvoiceTitle", parent=styles["Title"], fontSize=20, spaceAfter=2)
+    small_muted = ParagraphStyle("SmallMuted", parent=styles["Normal"], fontSize=9, textColor=colors.grey)
+    normal = styles["Normal"]
+    right = ParagraphStyle("Right", parent=styles["Normal"], alignment=TA_RIGHT)
+
+    elements = []
+    elements.append(Paragraph(INVOICE_SELLER_NAME, title_style))
+    elements.append(Paragraph(INVOICE_SELLER_NOTE, small_muted))
+    elements.append(Spacer(1, 14))
+
+    invoice_number = f"CC-{payment['id']:06d}"
+    issued_at = (payment["resolved_at"] or payment["created_at"] or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    header_data = [
+        [Paragraph(f"<b>Facture n° {invoice_number}</b>", normal), Paragraph(f"Émise le {issued_at}", right)],
+        [Paragraph(f"Professeur : <b>{teacher['name']}</b><br/>{teacher['email']}", normal),
+         Paragraph(f"Élève : <b>{student['name']}</b><br/>{student['email']}", right)],
+    ]
+    header_table = Table(header_data, colWidths=[95 * mm, 75 * mm])
+    header_table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(header_table)
+    elements.append(Spacer(1, 16))
+
+    duration = duree_lisible(slot["duration_minutes"])
+    mode_label = "En ligne" if slot["slot_mode"] == "en_ligne" else "En présentiel"
+    description = (
+        f"{course['title']}<br/><font size=8 color=grey>{course['subject']} · {course['level']} · "
+        f"séance du {slot['slot_date']} à {slot['slot_time']} ({duration}) · {mode_label}</font>"
+    )
+
+    table_data = [["Prestation", "Montant"], [Paragraph(description, normal), euros(payment["amount_cents"])]]
+    if payment["status"] == "released":
+        table_data.append(["dont commission plateforme", f"− {euros(payment['commission_cents'] or 0)}"])
+        table_data.append([Paragraph("<b>Net versé au professeur</b>", normal), Paragraph(f"<b>{euros(payment['teacher_amount_cents'] or 0)}</b>", normal)])
+    elif payment["status"] == "refunded":
+        table_data.append(["Statut", "Remboursé à l'élève"])
+    else:
+        table_data.append(["Statut", "En séquestre (en attente de règlement)"])
+
+    invoice_table = Table(table_data, colWidths=[120 * mm, 50 * mm])
+    invoice_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2a24")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, 0), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("TOPPADDING", (0, 0), (-1, 0), 8),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#d8d3c8")),
+        ("FONTSIZE", (0, 1), (-1, -1), 9.5),
+        ("TOPPADDING", (0, 1), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 7),
+    ]))
+    elements.append(invoice_table)
+    elements.append(Spacer(1, 20))
+
+    elements.append(Paragraph(
+        "Montant total réglé par l'élève à la réservation du créneau, mis en séquestre par "
+        "CoursConnect jusqu'au règlement du professeur (confirmation de l'élève ou versement "
+        "automatique 24h après la séance) ou jusqu'à un éventuel remboursement.",
+        small_muted,
+    ))
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph(f"Référence paiement interne : #{payment['id']} · Créneau #{slot['id']}", small_muted))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+
 def run_auto_release_once():
     """Parcourt les paiements toujours en séquestre dont le délai de 24h est
     dépassé et les verse automatiquement au professeur."""
@@ -918,6 +1012,16 @@ def start_auto_release_background_thread():
 
     thread = threading.Thread(target=loop, daemon=True)
     thread.start()
+
+
+@app.template_global("seance_terminee")
+def seance_terminee(slot):
+    """Utilisable dans les templates : renvoie True si le créneau (slot_date/
+    slot_time/duration_minutes) est déjà terminé, donc éligible à une facture."""
+    try:
+        return slot_end_datetime(slot) <= datetime.now()
+    except (TypeError, ValueError, KeyError):
+        return False
 
 
 @app.template_filter("duree_lisible")
@@ -1594,6 +1698,56 @@ def rembourser_paiement(payment_id):
     db.commit()
     flash("Remboursement effectué sur votre portefeuille.", "success")
     return redirect(request.referrer or url_for("etudiant"))
+
+
+@app.route("/facture/<int:slot_id>")
+@login_required()
+def telecharger_facture(slot_id):
+    """Facture PDF d'une séance passée et payée, téléchargeable par l'élève
+    qui a réservé le créneau ou par le professeur qui donne le cours."""
+    db = get_db()
+    user = current_user()
+
+    row = db.execute(
+        """
+        SELECT sl.*, c.teacher_id AS course_teacher_id
+        FROM slots sl
+        JOIN courses c ON c.id = sl.course_id
+        WHERE sl.id = ? AND EXISTS (SELECT 1 FROM payments p WHERE p.slot_id = sl.id)
+        """,
+        (slot_id,),
+    ).fetchone()
+
+    if not row:
+        flash("Aucune facture disponible pour cette séance (pas de paiement enregistré).", "error")
+        return redirect(request.referrer or url_for("index"))
+
+    is_student = user["id"] == row["reserved_by"]
+    is_teacher = user["id"] == row["course_teacher_id"]
+    if not (is_student or is_teacher):
+        abort(403)
+
+    # On ne délivre une facture qu'une fois la séance terminée.
+    if datetime.now() < slot_end_datetime(row):
+        flash("La facture sera disponible une fois la séance terminée.", "error")
+        return redirect(request.referrer or url_for("index"))
+
+    course = db.execute("SELECT * FROM courses WHERE id = ?", (row["course_id"],)).fetchone()
+    student = db.execute("SELECT * FROM users WHERE id = ?", (row["reserved_by"],)).fetchone()
+    teacher = db.execute("SELECT * FROM users WHERE id = ?", (row["course_teacher_id"],)).fetchone()
+    payment = db.execute("SELECT * FROM payments WHERE slot_id = ?", (slot_id,)).fetchone()
+
+    if not (student and teacher and payment):
+        flash("Aucune facture disponible pour cette séance.", "error")
+        return redirect(request.referrer or url_for("index"))
+
+    pdf_buffer = generate_invoice_pdf(payment, row, course, student, teacher)
+    return send_file(
+        pdf_buffer,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"facture-coursconnect-{payment['id']:06d}.pdf",
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -79,6 +79,9 @@
           {% if s['slot_mode'] == 'en_ligne' %}
             <a class="btn btn-sage" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('visio', course_id=c['id'], slot_id=s['id']) }}">🎥 Visio</a>
           {% endif %}
+          {% if c['price_cents'] and seance_terminee(s) %}
+            <a class="btn btn-outline" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('telecharger_facture', slot_id=s['id']) }}">🧾 Facture</a>
+          {% endif %}
         </div>
       {% endfor %}
 

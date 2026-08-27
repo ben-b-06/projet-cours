@@ -59,6 +59,10 @@
         </div>
       {% endif %}
 
+      {% if r['payment_id'] and seance_terminee(r) %}
+        <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;align-self:flex-start;" href="{{ url_for('telecharger_facture', slot_id=r['id']) }}">🧾 Télécharger la facture (PDF)</a>
+      {% endif %}
+
       <div class="course-meta">
         <span>Par {{ r['teacher_name'] }}</span>
         <a class="btn btn-outline" style="font-size:0.78rem;padding:0.4rem 0.7rem;" href="{{ url_for('messagerie_conversation', contact_id=r['teacher_id']) }}">Écrire au prof</a>
