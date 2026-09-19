@@ -314,6 +314,22 @@ def init_db():
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
+        -- Traits dessinés sur le tableau blanc numérique partagé pendant une
+        -- visioconférence. Chaque ligne est soit un trait ('stroke', avec la
+        -- liste de points et le style en JSON dans `data`), soit un effacement
+        -- complet du tableau ('clear', `data` vide). Rejoués dans l'ordre par
+        -- polling, comme les signaux WebRTC ci-dessus, pour resynchroniser un
+        -- participant qui rejoint en cours de séance.
+        CREATE TABLE IF NOT EXISTS whiteboard_strokes(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+            slot_id INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+            sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL DEFAULT 'stroke',
+            data TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         -- Paiement séquestré (escrow) pour un créneau réservé et payé par un
         -- élève. Le professeur n'est crédité qu'à la confirmation de l'élève,
         -- au remboursement (annulation), ou automatiquement 24h après la fin
@@ -3108,6 +3124,129 @@ def visio_chat_recevoir(course_id, slot_id):
                     "body": r["body"],
                     "created_at": r["created_at"],
                     "sender_id": r["sender_id"],
+                }
+                for r in rows
+            ]
+        }
+    )
+
+
+MAX_WHITEBOARD_POINTS = 2000  # borne défensive : un seul trait ne peut pas dépasser ce nombre de points
+
+
+@app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/tableau/dessiner", methods=["POST"])
+@login_required()
+@csrf.exempt  # appelé en fetch() JSON same-origin ; déjà protégé par SameSite=Lax + absence de CORS
+def visio_tableau_dessiner(course_id, slot_id):
+    """Enregistre un trait (ou un effacement complet) sur le tableau blanc
+    partagé de ce créneau, pour qu'il soit relu par l'autre participant."""
+    user = current_user()
+    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
+    if not course or not slot or not partner_id:
+        return jsonify({"error": "accès refusé"}), 403
+
+    data = request.get_json(silent=True) or {}
+    kind = data.get("kind")
+
+    if kind == "clear":
+        stroke_data = {}
+    elif kind == "stroke":
+        points = data.get("points")
+        color = data.get("color")
+        width = data.get("width")
+        mode = data.get("mode")
+        if (
+            not isinstance(points, list)
+            or not points
+            or len(points) > MAX_WHITEBOARD_POINTS
+            or not all(
+                isinstance(p, list) and len(p) == 2 and all(isinstance(v, (int, float)) for v in p)
+                for p in points
+            )
+            or not isinstance(color, str)
+            or len(color) > 16
+            or not isinstance(width, (int, float))
+            or not (1 <= width <= 40)
+            or mode not in ("draw", "erase")
+        ):
+            return jsonify({"error": "trait invalide"}), 400
+        stroke_data = {"points": points, "color": color, "width": width, "mode": mode}
+    else:
+        return jsonify({"error": "type de trait invalide"}), 400
+
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO whiteboard_strokes(course_id, slot_id, sender_id, kind, data) VALUES (?, ?, ?, ?, ?)",
+        (course_id, slot_id, user["id"], kind, json.dumps(stroke_data)),
+    )
+    db.commit()
+    return jsonify({"ok": True, "id": cur.lastrowid})
+
+
+@app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/tableau/annuler", methods=["POST"])
+@login_required()
+@csrf.exempt  # appelé en fetch() JSON same-origin ; déjà protégé par SameSite=Lax + absence de CORS
+def visio_tableau_annuler(course_id, slot_id):
+    """Annule le dernier trait dessiné par l'utilisateur courant sur ce
+    tableau (et seulement le sien : impossible d'annuler le trait de
+    l'autre participant). Insère un événement 'undo' pointant vers le trait
+    supprimé, pour que l'autre participant le retire aussi de son affichage."""
+    user = current_user()
+    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
+    if not course or not slot or not partner_id:
+        return jsonify({"error": "accès refusé"}), 403
+
+    db = get_db()
+    last = db.execute(
+        """
+        SELECT id FROM whiteboard_strokes
+        WHERE course_id = ? AND slot_id = ? AND sender_id = ? AND kind = 'stroke'
+        ORDER BY id DESC LIMIT 1
+        """,
+        (course_id, slot_id, user["id"]),
+    ).fetchone()
+    if not last:
+        return jsonify({"error": "aucun trait à annuler"}), 404
+
+    db.execute("DELETE FROM whiteboard_strokes WHERE id = ?", (last["id"],))
+    cur = db.execute(
+        "INSERT INTO whiteboard_strokes(course_id, slot_id, sender_id, kind, data) VALUES (?, ?, ?, 'undo', ?)",
+        (course_id, slot_id, user["id"], json.dumps({"target_id": last["id"]})),
+    )
+    db.commit()
+    return jsonify({"ok": True, "id": cur.lastrowid, "target_id": last["id"]})
+
+
+@app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/tableau/recevoir")
+@login_required()
+def visio_tableau_recevoir(course_id, slot_id):
+    """Poll des traits (et effacements) du tableau blanc partagé apparus
+    depuis `since`, pour resynchronisation continue entre les deux
+    participants (y compris un participant qui vient de rejoindre : il
+    récupère alors tout l'historique depuis since=0)."""
+    user = current_user()
+    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
+    if not course or not slot or not partner_id:
+        return jsonify({"error": "accès refusé"}), 403
+
+    since = request.args.get("since", 0, type=int)
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT * FROM whiteboard_strokes
+        WHERE course_id = ? AND slot_id = ? AND id > ?
+        ORDER BY id ASC
+        """,
+        (course_id, slot_id, since),
+    ).fetchall()
+    return jsonify(
+        {
+            "strokes": [
+                {
+                    "id": r["id"],
+                    "kind": r["kind"],
+                    "sender_id": r["sender_id"],
+                    "data": json.loads(r["data"]),
                 }
                 for r in rows
             ]
