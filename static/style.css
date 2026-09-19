@@ -431,6 +431,42 @@ label{font-size:0.83rem;font-weight:600;color:var(--text-muted);display:block;ma
 .visio-chat-form{display:flex;gap:0.6rem;align-items:flex-end;margin-top:0.6rem;}
 .visio-chat-form textarea{resize:none;flex:1;}
 
+/* ---------- tableau blanc numérique ---------- */
+.whiteboard-card{margin-bottom:1.4rem;}
+.whiteboard-toolbar{
+  display:flex;
+  align-items:center;
+  gap:0.9rem;
+  flex-wrap:wrap;
+  padding-bottom:0.7rem;
+  margin-bottom:0.7rem;
+  border-bottom:1px dashed var(--border);
+}
+.whiteboard-tool-group{display:flex;align-items:center;gap:0.4rem;}
+.whiteboard-tool-group label{font-size:0.78rem;color:var(--text-muted);}
+.whiteboard-colors{display:flex;gap:0.35rem;}
+.whiteboard-color-swatch{
+  width:22px;height:22px;
+  border-radius:50%;
+  border:2px solid transparent;
+  cursor:pointer;
+  padding:0;
+}
+.whiteboard-color-swatch.active{border-color:var(--ink);}
+.whiteboard-width{width:100px;}
+.whiteboard-canvas-wrap{
+  position:relative;
+  background:#fff;
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  overflow:hidden;
+  touch-action:none;
+}
+#whiteboardCanvas{display:block;width:100%;height:420px;cursor:crosshair;}
+@media (max-width:700px){
+  #whiteboardCanvas{height:300px;}
+}
+
 /* ---------- paramètres ---------- */
 .password-hint{font-size:0.8rem;color:var(--text-muted);margin:0.3rem 0 0;}
 
