@@ -118,6 +118,7 @@ portefeuille même si l'élève ferme son navigateur avant la redirection vers
 
 ### Limites connues / pistes d'évolution
 
+
 - Le solde affiché dans CoursConnect reste un **portefeuille interne**. Le retrait Stripe
   transfère le montant vers le compte Connect de l'utilisateur, puis Stripe le verse sur son
   compte bancaire selon le calendrier de paiement configuré.
