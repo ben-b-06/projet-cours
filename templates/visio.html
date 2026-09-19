@@ -28,6 +28,34 @@
     <button class="btn btn-outline" id="camBtn" style="display:none;">Couper la caméra</button>
   </div>
 
+  <div class="card whiteboard-card">
+    <div class="visio-chat-header">Tableau blanc partagé</div>
+    <div class="whiteboard-toolbar">
+      <div class="whiteboard-tool-group">
+        <label>Couleur</label>
+        <div class="whiteboard-colors" id="whiteboardColors">
+          <button type="button" class="whiteboard-color-swatch active" style="background:#1f2937;" data-color="#1f2937" aria-label="Noir"></button>
+          <button type="button" class="whiteboard-color-swatch" style="background:#dc2626;" data-color="#dc2626" aria-label="Rouge"></button>
+          <button type="button" class="whiteboard-color-swatch" style="background:#2563eb;" data-color="#2563eb" aria-label="Bleu"></button>
+          <button type="button" class="whiteboard-color-swatch" style="background:#16a34a;" data-color="#16a34a" aria-label="Vert"></button>
+          <button type="button" class="whiteboard-color-swatch" style="background:#d4a017;" data-color="#d4a017" aria-label="Or"></button>
+        </div>
+      </div>
+      <div class="whiteboard-tool-group">
+        <label for="whiteboardWidth">Épaisseur</label>
+        <input type="range" id="whiteboardWidth" class="whiteboard-width" min="1" max="20" value="3">
+      </div>
+      <div class="whiteboard-tool-group">
+        <button type="button" class="btn btn-outline" id="whiteboardEraseBtn">Gomme</button>
+        <button type="button" class="btn btn-outline" id="whiteboardUndoBtn">Annuler mon dernier trait</button>
+        <button type="button" class="btn btn-danger-outline" id="whiteboardClearBtn">Tout effacer</button>
+      </div>
+    </div>
+    <div class="whiteboard-canvas-wrap">
+      <canvas id="whiteboardCanvas"></canvas>
+    </div>
+  </div>
+
   <div class="card visio-chat">
     <div class="visio-chat-header">Discuter avec {{ partner['name'] }}</div>
     <div class="visio-chat-bubbles" id="chatBubbles">
@@ -105,6 +133,210 @@
     }
 
     setInterval(pollChat, 2000);
+
+    // --- Tableau blanc numérique partagé ---------------------------------
+    const whiteboardDrawUrl = "{{ url_for('visio_tableau_dessiner', course_id=course['id'], slot_id=slot['id']) }}";
+    const whiteboardPollUrl = "{{ url_for('visio_tableau_recevoir', course_id=course['id'], slot_id=slot['id']) }}";
+    const whiteboardUndoUrl = "{{ url_for('visio_tableau_annuler', course_id=course['id'], slot_id=slot['id']) }}";
+
+    const wbCanvas = document.getElementById('whiteboardCanvas');
+    const wbCtx = wbCanvas.getContext('2d');
+    const wbColorButtons = document.querySelectorAll('.whiteboard-color-swatch');
+    const wbWidthInput = document.getElementById('whiteboardWidth');
+    const wbEraseBtn = document.getElementById('whiteboardEraseBtn');
+    const wbUndoBtn = document.getElementById('whiteboardUndoBtn');
+    const wbClearBtn = document.getElementById('whiteboardClearBtn');
+
+    let wbColor = '#1f2937';
+    let wbMode = 'draw'; // 'draw' ou 'erase'
+    let wbDrawing = false;
+    let wbCurrentPoints = []; // points normalisés (0..1) du trait en cours
+    let wbLastSyncId = 0;
+    let wbHistory = []; // {id, kind, sender_id, data}
+
+    function resizeWhiteboardCanvas() {
+      const rect = wbCanvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      wbCanvas.width = Math.max(1, Math.round(rect.width * ratio));
+      wbCanvas.height = Math.max(1, Math.round(rect.height * ratio));
+      redrawWhiteboard();
+    }
+
+    function pointToCanvas(nx, ny) {
+      return [nx * wbCanvas.width, ny * wbCanvas.height];
+    }
+
+    function drawStrokeData(data) {
+      const pts = data.points || [];
+      if (pts.length < 1) return;
+      wbCtx.save();
+      wbCtx.lineJoin = 'round';
+      wbCtx.lineCap = 'round';
+      wbCtx.lineWidth = (data.width || 3) * (wbCanvas.width / (wbCanvas.getBoundingClientRect().width || 1));
+      if (data.mode === 'erase') {
+        wbCtx.globalCompositeOperation = 'destination-out';
+        wbCtx.strokeStyle = 'rgba(0,0,0,1)';
+      } else {
+        wbCtx.globalCompositeOperation = 'source-over';
+        wbCtx.strokeStyle = data.color || '#1f2937';
+      }
+      wbCtx.beginPath();
+      const [sx, sy] = pointToCanvas(pts[0][0], pts[0][1]);
+      wbCtx.moveTo(sx, sy);
+      if (pts.length === 1) {
+        // Simple point (clic sans glisser) : petit rond pour rester visible.
+        wbCtx.lineTo(sx + 0.01, sy + 0.01);
+      }
+      for (let i = 1; i < pts.length; i++) {
+        const [x, y] = pointToCanvas(pts[i][0], pts[i][1]);
+        wbCtx.lineTo(x, y);
+      }
+      wbCtx.stroke();
+      wbCtx.restore();
+    }
+
+    function redrawWhiteboard() {
+      wbCtx.clearRect(0, 0, wbCanvas.width, wbCanvas.height);
+      for (const entry of wbHistory) {
+        if (entry.kind === 'stroke') drawStrokeData(entry.data);
+      }
+    }
+
+    function setWbColor(color) {
+      wbColor = color;
+      wbMode = 'draw';
+      wbEraseBtn.classList.remove('btn-gold');
+      wbEraseBtn.classList.add('btn-outline');
+      wbColorButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.color === color));
+    }
+
+    wbColorButtons.forEach((btn) => {
+      btn.addEventListener('click', () => setWbColor(btn.dataset.color));
+    });
+
+    wbEraseBtn.addEventListener('click', () => {
+      wbMode = 'erase';
+      wbEraseBtn.classList.remove('btn-outline');
+      wbEraseBtn.classList.add('btn-gold');
+      wbColorButtons.forEach((btn) => btn.classList.remove('active'));
+    });
+
+    function wbPointerToNormalized(evt) {
+      const rect = wbCanvas.getBoundingClientRect();
+      const x = (evt.clientX - rect.left) / rect.width;
+      const y = (evt.clientY - rect.top) / rect.height;
+      return [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
+    }
+
+    async function sendStroke(points, mode, color, width) {
+      try {
+        const res = await fetch(whiteboardDrawUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ kind: 'stroke', points, mode, color, width }),
+        });
+        const data = await res.json();
+        if (data && data.id) {
+          wbHistory.push({ id: data.id, kind: 'stroke', sender_id: myUserId, data: { points, mode, color, width } });
+          wbLastSyncId = Math.max(wbLastSyncId, data.id);
+        }
+      } catch (e) { /* le trait reste affiché localement ; sera perdu si l'envoi échoue */ }
+    }
+
+    wbCanvas.addEventListener('pointerdown', (evt) => {
+      wbDrawing = true;
+      wbCurrentPoints = [wbPointerToNormalized(evt)];
+      wbCanvas.setPointerCapture(evt.pointerId);
+    });
+
+    wbCanvas.addEventListener('pointermove', (evt) => {
+      if (!wbDrawing) return;
+      const pt = wbPointerToNormalized(evt);
+      wbCurrentPoints.push(pt);
+      // Aperçu local immédiat pendant le tracé, sans attendre le réseau.
+      drawStrokeData({
+        points: wbCurrentPoints.slice(-2),
+        mode: wbMode,
+        color: wbColor,
+        width: parseFloat(wbWidthInput.value),
+      });
+    });
+
+    function finishWbStroke() {
+      if (!wbDrawing) return;
+      wbDrawing = false;
+      if (wbCurrentPoints.length > 0) {
+        sendStroke(wbCurrentPoints, wbMode, wbColor, parseFloat(wbWidthInput.value));
+      }
+      wbCurrentPoints = [];
+    }
+
+    wbCanvas.addEventListener('pointerup', finishWbStroke);
+    wbCanvas.addEventListener('pointercancel', finishWbStroke);
+    wbCanvas.addEventListener('pointerleave', () => { if (wbDrawing) finishWbStroke(); });
+
+    wbClearBtn.addEventListener('click', async () => {
+      wbHistory = [];
+      redrawWhiteboard();
+      try {
+        const res = await fetch(whiteboardDrawUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ kind: 'clear' }),
+        });
+        const data = await res.json();
+        if (data && data.id) wbLastSyncId = Math.max(wbLastSyncId, data.id);
+      } catch (e) { /* le tableau reste effacé localement ; se resynchronisera au prochain poll */ }
+    });
+
+    wbUndoBtn.addEventListener('click', async () => {
+      try {
+        const res = await fetch(whiteboardUndoUrl, {
+          method: 'POST',
+          credentials: 'same-origin',
+        });
+        const data = await res.json();
+        if (data && data.ok) {
+          wbHistory = wbHistory.filter((e) => e.id !== data.target_id);
+          wbLastSyncId = Math.max(wbLastSyncId, data.id);
+          redrawWhiteboard();
+        }
+      } catch (e) { /* réessayer plus tard : le poll ramènera l'état correct */ }
+    });
+
+    async function pollWhiteboard() {
+      try {
+        const res = await fetch(`${whiteboardPollUrl}?since=${wbLastSyncId}`, { credentials: 'same-origin' });
+        const data = await res.json();
+        let needsFullRedraw = false;
+        for (const entry of (data.strokes || [])) {
+          wbLastSyncId = Math.max(wbLastSyncId, entry.id);
+          if (entry.sender_id === myUserId && entry.kind === 'stroke') {
+            // Déjà dessiné localement au moment de l'envoi : on évite un doublon.
+            continue;
+          }
+          if (entry.kind === 'clear') {
+            wbHistory = [];
+            needsFullRedraw = true;
+          } else if (entry.kind === 'undo') {
+            const targetId = entry.data && entry.data.target_id;
+            wbHistory = wbHistory.filter((e) => e.id !== targetId);
+            needsFullRedraw = true;
+          } else if (entry.kind === 'stroke') {
+            wbHistory.push(entry);
+            if (!needsFullRedraw) drawStrokeData(entry.data);
+          }
+        }
+        if (needsFullRedraw) redrawWhiteboard();
+      } catch (e) { /* silencieux : on réessaiera au prochain tick */ }
+    }
+
+    resizeWhiteboardCanvas();
+    window.addEventListener('resize', resizeWhiteboardCanvas);
+    pollWhiteboard();
+    setInterval(pollWhiteboard, 1200);
 
     const statusEl = document.getElementById('visioStatus');
     const localVideo = document.getElementById('localVideo');
