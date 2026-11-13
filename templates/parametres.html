@@ -1,31 +1,60 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Mon compte · {{ SITE_NAME }}{% endblock %}
 {% block content %}
-  <span class="eyebrow">Paramètres</span>
-  <div class="card form-card">
-    <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Changer mon mot de passe</h2>
-    <p class="mono" style="font-size:0.8rem;color:var(--text-muted);margin:0 0 1.3rem;">{{ user['email'] }}</p>
+<div class="form-medium">
+  <h1>Mon compte</h1>
+  <dl class="facts">
+    <dt>Nom</dt><dd>{{ user['name'] }}</dd>
+    <dt>Adresse e-mail</dt><dd>{{ user['email'] }}</dd>
+    <dt>Type de compte</dt><dd>{{ {'prof': 'Professeur', 'etudiant': 'Élève ou parent', 'admin': 'Administration'}[user['role']] }}</dd>
+    <dt>Inscrit le</dt><dd>{{ user['created_at']|date_fr }}</dd>
+  </dl>
 
-    <form method="post">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <div class="field">
-        <label>Mot de passe actuel</label>
-        <input type="password" name="current_password" required placeholder="••••••••">
-      </div>
-      <div class="field">
-        <label>Nouveau mot de passe</label>
-        <input type="password" name="new_password" required placeholder="••••••••">
-        <p class="password-hint">4 caractères minimum.</p>
-      </div>
-      <div class="field">
-        <label>Confirmer le nouveau mot de passe</label>
-        <input type="password" name="confirm_password" required placeholder="••••••••">
-      </div>
-      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;">Mettre à jour le mot de passe</button>
-    </form>
+  <h2>Changer de mot de passe</h2>
+  {% if user['must_change_password'] %}
+    <p class="notice notice-warn">Votre mot de passe a été réinitialisé par l'équipe : choisissez-en un nouveau pour continuer.</p>
+  {% endif %}
+  <form method="post" class="box">
+    {{ m.csrf() }}
+    <div class="field">
+      <label for="current_password">{{ 'Mot de passe provisoire' if user['must_change_password'] else 'Mot de passe actuel' }}</label>
+      <input type="password" id="current_password" name="current_password" autocomplete="current-password" maxlength="129" required>
+    </div>
+    <div class="field">
+      <label for="new_password">Nouveau mot de passe</label>
+      <input type="password" id="new_password" name="new_password" autocomplete="new-password" minlength="12" maxlength="128" required aria-describedby="np-hint">
+      <p class="hint" id="np-hint">12 caractères minimum, avec au moins trois types parmi : minuscules, majuscules, chiffres, caractères spéciaux.</p>
+    </div>
+    <div class="field">
+      <label for="confirm_password">Confirmer le nouveau mot de passe</label>
+      <input type="password" id="confirm_password" name="confirm_password" autocomplete="new-password" maxlength="128" required>
+    </div>
+    <button class="btn" type="submit">Enregistrer le mot de passe</button>
+    <p class="hint">Changer de mot de passe déconnecte vos autres appareils.</p>
+  </form>
 
-    <p class="password-hint" style="margin-top:1.3rem;">
-      Mot de passe oublié et impossible de vous connecter ? Contactez l'administrateur de la plateforme,
-      qui peut réinitialiser votre mot de passe depuis son tableau de bord.
-    </p>
-  </div>
+  {% if not user['must_change_password'] %}
+    <h2>Mes données</h2>
+    <p>Vous pouvez télécharger l'ensemble des données de votre compte (profil, réservations, paiements, messages) dans un fichier JSON.</p>
+    <p><a class="btn btn-secondary" href="{{ url_for('exporter_donnees') }}">Télécharger mes données</a></p>
+    <p class="small muted">Pour toute autre demande (rectification, opposition, limitation), écrivez à
+      <a href="mailto:{{ LEGAL.privacy_email }}">{{ LEGAL.privacy_email }}</a>.</p>
+
+    {% if user['role'] != 'admin' %}
+      <h2>Supprimer mon compte</h2>
+      <p>La suppression est définitive. Vos messages, votre profil et votre photo sont effacés. Si vous avez effectué ou reçu des paiements,
+        les justificatifs correspondants sont conservés 10 ans sous forme anonymisée, comme l'exige le Code de commerce.
+        Annulez d'abord vos séances à venir.</p>
+      <form method="post" action="{{ url_for('supprimer_compte') }}" class="box" data-confirm="Supprimer définitivement votre compte ?">
+        {{ m.csrf() }}
+        <div class="field">
+          <label for="delete_password">Mot de passe</label>
+          <input type="password" id="delete_password" name="password" autocomplete="current-password" maxlength="129" required>
+        </div>
+        <button class="btn btn-danger" type="submit">Supprimer mon compte</button>
+      </form>
+    {% endif %}
+  {% endif %}
+</div>
 {% endblock %}

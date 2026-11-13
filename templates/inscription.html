@@ -1,42 +1,44 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Créer un compte · {{ SITE_NAME }}{% endblock %}
 {% block content %}
-  <span class="eyebrow">Authentification / Inscription</span>
-  <div class="card form-card">
-    <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Créer un compte</h2>
-    <form method="post">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <div class="field">
-        <label>Nom complet</label>
-        <input type="text" name="name" required placeholder="Prénom Nom">
+<div class="form-narrow">
+  <h1>Créer un compte</h1>
+  {% if registration_mode == 'profs' %}
+    <p class="notice notice-warn">Les inscriptions sont pour l'instant réservées aux professeurs.</p>
+  {% endif %}
+  <form method="post" class="box">
+    {{ m.csrf() }}
+    <fieldset>
+      <legend>Type de compte</legend>
+      <div class="choices">
+        {% if registration_mode != 'profs' %}
+          <label class="check"><input type="radio" name="role" value="etudiant" {% if form.get('role', 'etudiant') == 'etudiant' %}checked{% endif %} required> Élève ou parent d'élève</label>
+        {% endif %}
+        <label class="check"><input type="radio" name="role" value="prof" {% if form.get('role') == 'prof' or registration_mode == 'profs' %}checked{% endif %} required> Professeur</label>
       </div>
-      <div class="field">
-        <label>Adresse e-mail</label>
-        <input type="email" name="email" required placeholder="vous@exemple.fr">
-      </div>
-      <div class="field">
-        <label>Mot de passe</label>
-        <input type="password" name="password" required minlength="4" placeholder="Au moins 4 caractères">
-      </div>
-      <div class="field">
-        <label>Je m'inscris en tant que</label>
-        <div class="radio-row">
-          <label class="radio-card checked" onclick="syncRadio(this)">
-            <input type="radio" name="role" value="prof" checked>Professeur
-          </label>
-          <label class="radio-card" onclick="syncRadio(this)">
-            <input type="radio" name="role" value="etudiant">Étudiant
-          </label>
-        </div>
-      </div>
-      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;">Créer mon compte</button>
-    </form>
-    <a class="helper-link" href="{{ url_for('connexion') }}">Déjà un compte ? Se connecter</a>
-  </div>
-
-  <script>
-    function syncRadio(label){
-      document.querySelectorAll('.radio-card').forEach(c => c.classList.remove('checked'));
-      label.classList.add('checked');
-    }
-  </script>
+    </fieldset>
+    <div class="field">
+      <label for="name">Prénom et nom</label>
+      <input type="text" id="name" name="name" value="{{ form.get('name', '') }}" autocomplete="name" maxlength="80" required>
+      <p class="hint">Pour un élève mineur, indiquez le nom du parent titulaire du compte.</p>
+    </div>
+    <div class="field">
+      <label for="email">Adresse e-mail</label>
+      <input type="email" id="email" name="email" value="{{ form.get('email', '') }}" autocomplete="email" maxlength="254" required>
+    </div>
+    <div class="field">
+      <label for="password">Mot de passe</label>
+      <input type="password" id="password" name="password" autocomplete="new-password" minlength="12" maxlength="128" required aria-describedby="pwd-hint">
+      <p class="hint" id="pwd-hint">12 caractères minimum, avec au moins trois types parmi : minuscules, majuscules, chiffres, caractères spéciaux.</p>
+    </div>
+    <label class="check"><input type="checkbox" name="adult" value="1" required>
+      <span>J'ai 18 ans ou plus. Si l'élève est mineur, je suis son parent ou représentant légal et je crée ce compte pour lui.</span></label>
+    <label class="check"><input type="checkbox" name="accept_terms" value="1" required>
+      <span>J'accepte les <a href="{{ url_for('cgu') }}">conditions générales d'utilisation</a> et j'ai pris connaissance de la
+      <a href="{{ url_for('confidentialite') }}">politique de confidentialité</a>.</span></label>
+    <p><button class="btn" type="submit">Créer mon compte</button></p>
+  </form>
+  <p>Déjà inscrit ? <a href="{{ url_for('connexion') }}">Se connecter</a></p>
+</div>
 {% endblock %}

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Paiements · {{ SITE_NAME }}{% endblock %}
+{% block content %}
+<h1>Paiements</h1>
+
+<div class="box">
+  <h2>Encaissement par Stripe</h2>
+  <p>Les élèves paient leurs séances par carte. Le paiement est encaissé par Stripe, prestataire de paiement agréé,
+    pour votre compte : l'argent arrive sur votre compte Stripe puis est viré sur votre compte bancaire selon le calendrier de Stripe.
+    {{ SITE_NAME }} ne reçoit que sa commission de {{ PLATFORM_FEE_PERCENT }} % et ne conserve jamais votre argent.</p>
+  {% if not stripe_configured %}
+    <p class="notice notice-warn">Le paiement en ligne n'est pas encore configuré sur le site. Vous pouvez publier des cours gratuits.</p>
+  {% elif current_user['teacher_status'] not in TEACHER_STATUSES %}
+    <p class="notice notice-warn">Indiquez d'abord votre statut dans votre <a href="{{ url_for('prof_profil') }}">profil</a>.</p>
+  {% elif current_user['stripe_charges_enabled'] %}
+    <p><span class="status status-ok">Paiements activés.</span>
+      {% if not current_user['stripe_payouts_enabled'] %}<span class="status status-warn">Virements vers votre banque en attente de vérification par Stripe.</span>{% endif %}</p>
+    <p><a class="btn btn-secondary" href="{{ url_for('stripe_connect_tableau') }}">Voir mon solde et mes virements sur Stripe</a></p>
+  {% else %}
+    {% if current_user['stripe_account_id'] %}
+      <p><span class="status status-warn">Dossier Stripe incomplet ou en cours de vérification.</span></p>
+    {% endif %}
+    <form method="post" action="{{ url_for('stripe_connect_activer') }}">
+      {{ m.csrf() }}
+      <button class="btn" type="submit">{{ 'Compléter mon dossier Stripe' if current_user['stripe_account_id'] else 'Activer les paiements' }}</button>
+    </form>
+    <p class="hint">Stripe vous demandera une pièce d'identité et votre RIB. Ces informations sont transmises directement à Stripe : le site ne les voit pas.</p>
+  {% endif %}
+</div>
+
+<h2>Récapitulatif annuel</h2>
+<p class="small muted">Les revenus perçus par l'intermédiaire de plateformes en ligne sont imposables et peuvent être soumis à cotisations sociales
+  (<a href="https://www.impots.gouv.fr" rel="noopener">impots.gouv.fr</a>,
+  <a href="https://www.urssaf.fr" rel="noopener">urssaf.fr</a>). Ce récapitulatif vous est fourni chaque année conformément à l'article 242 bis du Code général des impôts.</p>
+<div class="table-wrap">
+  <table class="data">
+    <thead><tr><th>Année</th><th class="num">Séances payées</th><th class="num">Montant payé par les élèves</th><th class="num">Commission</th><th class="num">Net perçu</th><th></th></tr></thead>
+    <tbody>
+    {% for s in summaries %}
+      <tr>
+        <td>{{ s.year }}</td>
+        <td class="num">{{ s.count }}</td>
+        <td class="num">{{ s.gross|euros }}</td>
+        <td class="num">{{ s.fees|euros }}</td>
+        <td class="num">{{ s.net|euros }}</td>
+        <td><a href="{{ url_for('recapitulatif_annuel', year=s.year) }}">PDF</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>Détail des séances</h2>
+{% if items %}
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>Payée le</th><th>Cours</th><th>Élève</th><th>Séance</th><th class="num">Prix</th><th class="num">Commission</th><th>État</th><th>Documents</th></tr></thead>
+      <tbody>
+      {% for it in items %}
+        <tr>
+          <td class="nowrap">{{ it['paid_at']|date_fr }}</td>
+          <td>{{ it['course_title'] }}</td>
+          <td>{{ it['student_name'] }}</td>
+          <td class="nowrap">{{ it['slot_date'] }} {{ it['slot_time'] }}</td>
+          <td class="num">{{ it['amount_cents']|euros }}</td>
+          <td class="num">{{ it['platform_fee_cents']|euros }}</td>
+          <td>{{ m.item_status(it['status']) }}</td>
+          <td class="nowrap">
+            {% if it['invoice_number'] %}<a href="{{ url_for('telecharger_facture', order_id=it['order_id']) }}">{{ it['invoice_number'] }}</a>{% endif %}
+            {% if it['credit_note_number'] %}<br><a href="{{ url_for('telecharger_avoir', item_id=it['id']) }}">Avoir {{ it['credit_note_number'] }}</a>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  <p class="muted">Aucune séance payée pour le moment.</p>
+{% endif %}
+{% endblock %}

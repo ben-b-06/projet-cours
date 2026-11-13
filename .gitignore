@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+*.db
+*.db-wal
+*.db-shm
+.flask_secret_key
+.maintenance.lock
+.env

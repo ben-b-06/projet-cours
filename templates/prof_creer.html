@@ -1,129 +1,88 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Nouveau cours · {{ SITE_NAME }}{% endblock %}
 {% block content %}
-  <span class="eyebrow">Professeur / Créer un cours</span>
-  <div class="card form-card wide">
-    <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Nouveau cours</h2>
-    <form method="post" id="courseForm">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <div class="field">
-        <label>Titre du cours</label>
-        <input type="text" name="title" required placeholder="Ex. Préparer le brevet de mathématiques"
-               value="{{ form.get('title', '') }}">
-      </div>
-
-      <div class="row-fields">
-        <div class="field" style="flex:1;">
-          <label>Matières</label>
-          <div class="multi-choice-grid">
-            {% for m in matieres %}
-              <label class="multi-choice">
-                <input type="checkbox" name="subject" value="{{ m }}" {% if m in selected_subjects %}checked{% endif %}>
-                <span>{{ m }}</span>
-              </label>
-            {% endfor %}
-          </div>
-        </div>
-        <div class="field" style="flex:1;">
-          <label>Niveaux scolaires</label>
-          <div class="multi-choice-grid">
-            {% for n in niveaux %}
-              <label class="multi-choice">
-                <input type="checkbox" name="level" value="{{ n }}" {% if n in selected_levels %}checked{% endif %}>
-                <span>{{ n }}</span>
-              </label>
-            {% endfor %}
-          </div>
-        </div>
-      </div>
-
-      <div class="field">
-        <label>Prix d'une séance (€)</label>
-        <input type="number" name="price" min="0" step="0.5" required placeholder="Ex. 25"
-               value="{{ form.get('price', '') }}">
-        <p class="slot-help">Ce montant est débité du portefeuille de l'élève à la réservation, conservé en séquestre, puis versé à vous 24h après le cours (sauf remboursement demandé par l'élève).</p>
-      </div>
-
-      <div class="field">
-        <label>Description</label>
-        <textarea name="description" rows="4" required placeholder="Ce que les étudiants vont apprendre...">{{ form.get('description', '') }}</textarea>
-      </div>
-
-      <div class="field">
-        <label>Modalité du cours</label>
-        <div class="row-fields" id="modeChoice">
-          {% for m in modes %}
-            <label class="slot-pick" style="flex:1;cursor:pointer;">
-              <input type="radio" name="mode" value="{{ m }}" required
-                     {% if form.get('mode') == m or (not form.get('mode') and m == 'en_ligne') %}checked{% endif %}>
-              {{ mode_labels[m] }}
-            </label>
-          {% endfor %}
-        </div>
-      </div>
-
-      <div class="field" id="cityField" style="display:none;">
-        <label>Ville (cours en présentiel)</label>
-        <input type="text" name="city" placeholder="Ex. Lyon" value="{{ form.get('city', '') }}">
-      </div>
-
-      <div class="field">
-        <label>Créneaux proposés</label>
-        <p class="slot-help">Ajoutez autant de créneaux que vous voulez : chacun a une date, une heure de début et une durée.</p>
-        <div id="slotRows"></div>
-        <button type="button" class="btn btn-outline" id="addSlotBtn" style="margin-top:0.4rem;">+ Ajouter un créneau</button>
-      </div>
-
-      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;margin-top:0.6rem;">Publier le cours</button>
-    </form>
-  </div>
-
-  <template id="slotRowTemplate">
-    <div class="slot-row">
-      <div class="field" style="flex:1.2;margin-bottom:0;">
-        <label>Date</label>
-        <input type="date" name="slot_date[]" required>
-      </div>
-      <div class="field" style="flex:1;margin-bottom:0;">
-        <label>Heure</label>
-        <input type="time" name="slot_time[]" required>
-      </div>
-      <div class="field" style="flex:1;margin-bottom:0;">
-        <label>Durée (min)</label>
-        <input type="number" name="slot_duration[]" min="5" step="5" value="60" required>
-      </div>
-      <button type="button" class="slot-remove" title="Retirer ce créneau">✕</button>
+<div class="form-medium">
+  <h1>Publier un cours</h1>
+  <form method="post" class="box">
+    {{ m.csrf() }}
+    <div class="field">
+      <label for="title">Titre</label>
+      <input type="text" id="title" name="title" value="{{ form.get('title', '') }}" maxlength="120" required>
+      <p class="hint">Par exemple : « Préparer le brevet de mathématiques ».</p>
     </div>
-  </template>
 
-  <script>
-    const cityField = document.getElementById('cityField');
-    const cityInput = cityField.querySelector('input[name="city"]');
+    <fieldset>
+      <legend>Matières</legend>
+      <div class="choices">
+        {% for x in matieres %}
+          <label class="check"><input type="checkbox" name="subject" value="{{ x }}"{% if x in selected_subjects %} checked{% endif %}> {{ x }}</label>
+        {% endfor %}
+      </div>
+    </fieldset>
 
-    function updateCityVisibility(){
-      const checked = document.querySelector('input[name="mode"]:checked');
-      const needsCity = checked && (checked.value === 'presentiel' || checked.value === 'les_deux');
-      cityField.style.display = needsCity ? '' : 'none';
-      cityInput.required = !!needsCity;
-    }
-    document.querySelectorAll('input[name="mode"]').forEach((radio) => {
-      radio.addEventListener('change', updateCityVisibility);
-    });
-    updateCityVisibility();
+    <fieldset>
+      <legend>Classes</legend>
+      <div class="choices">
+        {% for x in niveaux %}
+          <label class="check"><input type="checkbox" name="level" value="{{ x }}"{% if x in selected_levels %} checked{% endif %}> {{ x }}</label>
+        {% endfor %}
+      </div>
+    </fieldset>
 
-    const slotRows = document.getElementById('slotRows');
-    const template = document.getElementById('slotRowTemplate');
+    <div class="field">
+      <label for="description">Description</label>
+      <textarea id="description" name="description" rows="5" maxlength="3000" required>{{ form.get('description', '') }}</textarea>
+      <p class="hint">Ce que vous travaillerez avec l'élève, votre méthode, le matériel éventuel.</p>
+    </div>
 
-    function addSlotRow(){
-      const clone = template.content.cloneNode(true);
-      clone.querySelector('.slot-remove').addEventListener('click', (e) => {
-        e.target.closest('.slot-row').remove();
-      });
-      slotRows.appendChild(clone);
-    }
+    <div class="field">
+      <label for="price">Prix d'une séance, en euros TTC</label>
+      <input type="text" id="price" name="price" inputmode="decimal" value="{{ form.get('price', '') }}" maxlength="8" required>
+      <p class="hint">Entre 5 et 500 €, ou 0 pour une séance gratuite. L'élève paie ce montant ; vous recevez ce montant moins la commission
+        de {{ PLATFORM_FEE_PERCENT }} % de la plateforme.</p>
+    </div>
 
-    document.getElementById('addSlotBtn').addEventListener('click', addSlotRow);
+    <fieldset>
+      <legend>Modalité</legend>
+      <div class="choices">
+        {% for x in modes %}
+          <label class="check"><input type="radio" name="mode" value="{{ x }}" required
+            {% if form.get('mode') == x or (not form.get('mode') and x == 'en_ligne') %}checked{% endif %}> {{ MODE_LABELS[x] }}</label>
+        {% endfor %}
+      </div>
+    </fieldset>
 
-    // Toujours démarrer avec un premier créneau prêt à remplir
-    addSlotRow();
-  </script>
+    <div class="field" data-show-when="mode:presentiel,les_deux" data-required-when-shown>
+      <label for="city">Ville des séances en présentiel</label>
+      <input type="text" id="city" name="city" value="{{ form.get('city', '') }}" maxlength="80">
+      <p class="hint">Indiquez seulement la ville : l'adresse exacte se convient avec l'élève par la messagerie.</p>
+    </div>
+
+    <fieldset>
+      <legend>Créneaux</legend>
+      <p class="hint">Heure de Paris. Chaque créneau est réservé par un seul élève.</p>
+      <div id="slotRows"></div>
+      <noscript>
+        <div class="slot-row">
+          <div class="field"><label>Date</label><input type="date" name="slot_date[]"></div>
+          <div class="field"><label>Heure</label><input type="time" name="slot_time[]"></div>
+          <div class="field"><label>Durée (min)</label><input type="number" name="slot_duration[]" min="15" max="480" step="5" value="60"></div>
+        </div>
+      </noscript>
+      <p><button type="button" class="btn btn-secondary btn-small" id="addSlotBtn">Ajouter un créneau</button></p>
+    </fieldset>
+
+    <button class="btn" type="submit">Publier le cours</button>
+  </form>
+</div>
+
+<template id="slotRowTemplate">
+  <div class="slot-row">
+    <div class="field"><label>Date<input type="date" name="slot_date[]" required></label></div>
+    <div class="field"><label>Heure<input type="time" name="slot_time[]" required></label></div>
+    <div class="field"><label>Durée (min)<input type="number" name="slot_duration[]" min="15" max="480" step="5" value="60" required></label></div>
+    <button type="button" class="btn btn-danger btn-small slot-remove">Retirer</button>
+  </div>
+</template>
 {% endblock %}

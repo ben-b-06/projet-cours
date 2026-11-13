@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Conditions générales de vente · {{ SITE_NAME }}{% endblock %}
+{% block content %}
+<div class="prose">
+  <h1>Conditions générales de vente</h1>
+  <p class="updated">Version du {{ TERMS_DATE }}. Applicables à toute réservation de séance effectuée sur {{ SITE_NAME }}.</p>
+
+  <h2>1. Qui vend quoi</h2>
+  <p>Le cours est vendu par le <strong>professeur</strong> au titulaire du compte élève. Le nom du professeur et son statut
+    (particulier ou micro-entrepreneur, avec son numéro SIRET) sont affichés sur chaque cours, avant la réservation.</p>
+  <p>{{ LEGAL.editor_name }}, éditeur de la plateforme, agit comme intermédiaire : il présente les cours, transmet la réservation et établit
+    les justificatifs au nom du professeur. Il n'est pas le vendeur des cours.</p>
+
+  <h2>2. Prix</h2>
+  <p>Les prix sont fixés librement par les professeurs, en euros toutes taxes comprises, pour une séance. Le prix affiché est le prix total payé
+    par l'élève : la commission de la plateforme ({{ PLATFORM_FEE_PERCENT }} % du prix) est à la charge du professeur et déjà comprise.
+    Les professeurs micro-entrepreneurs bénéficient de la franchise en base de TVA (article 293 B du CGI) ; les professeurs particuliers
+    ne sont pas assujettis à la TVA.</p>
+
+  <h2>3. Réservation</h2>
+  <ol>
+    <li>Le titulaire du compte choisit un ou plusieurs créneaux, prend connaissance des présentes conditions et les accepte.</li>
+    <li>Il valide en cliquant sur « Réserver avec obligation de paiement », puis paie sur la page sécurisée de Stripe.
+      Les créneaux sont bloqués pendant 30 minutes environ le temps du paiement.</li>
+    <li>La réservation est conclue dès la confirmation du paiement, qui s'affiche dans « Mes séances ». Le justificatif est disponible
+      dans la page « Paiements ».</li>
+  </ol>
+  <p>Une séance ne peut pas être réservée moins d'une heure avant son début.</p>
+
+  <h2>4. Paiement</h2>
+  <p>Le paiement se fait par carte bancaire (y compris par Apple Pay ou Google Pay lorsqu'ils sont proposés), sur la page de paiement
+    de Stripe. Les données de carte sont saisies chez Stripe : la plateforme n'y a jamais accès.</p>
+  <p>Le paiement est encaissé par Stripe Payments Europe, Limited, établissement de monnaie électronique agréé, pour le compte du professeur.
+    La somme est créditée sur le compte Stripe du professeur, déduction faite de la commission de la plateforme.
+    {{ SITE_NAME }} ne reçoit, ne conserve et ne détient aucune somme pour le compte de l'élève ou du professeur.</p>
+
+  <h2 id="annulation">5. Annulation par l'élève</h2>
+  <ul>
+    <li><strong>Jusqu'à {{ cancellation_hours }} heures avant le début</strong> de la séance : annulation gratuite depuis « Mes séances »,
+      remboursement intégral sur la carte utilisée (délai bancaire habituel : 5 à 10 jours ouvrés).</li>
+    <li><strong>Moins de {{ cancellation_hours }} heures avant</strong> : la séance reste due, sauf exercice du droit de rétractation
+      dans les conditions de l'article 7, ou accord du professeur. En cas de difficulté, utilisez le formulaire de signalement.</li>
+    <li>Si l'élève ne se présente pas, la séance n'est pas remboursée.</li>
+  </ul>
+
+  <h2>6. Annulation ou absence du professeur</h2>
+  <p>Si le professeur annule une séance, retire son cours ou ferme son compte, l'élève est remboursé intégralement et automatiquement.
+    Si le professeur ne se présente pas ou a plus de 15 minutes de retard sans avoir prévenu, l'élève le signale depuis « Mes séances »
+    dans les 7 jours : après vérification, la séance est remboursée intégralement.</p>
+
+  <h2 id="retractation">7. Droit de rétractation</h2>
+  <p><strong>Professeur professionnel (micro-entrepreneur).</strong> Le titulaire du compte, s'il est un consommateur, dispose d'un délai de
+    14 jours à compter de la réservation pour se rétracter, sans avoir à se justifier (article L. 221-18 du Code de la consommation).
+    En réservant, il demande expressément que les séances puissent commencer avant la fin de ce délai (article L. 221-25). En conséquence :</p>
+  <ul>
+    <li>s'il se rétracte avant le début d'une séance, il est remboursé intégralement de cette séance ;</li>
+    <li>une séance entièrement donnée ne peut plus faire l'objet d'une rétractation (article L. 221-28, 1°) ;</li>
+    <li>s'il se rétracte au cours d'une séance commencée, il doit le montant correspondant au service fourni jusque-là.</li>
+  </ul>
+  <p>Pour se rétracter, il suffit d'utiliser le bouton « Annuler la séance » (disponible tant que la séance n'a pas commencé pendant le délai
+    de 14 jours) ou d'adresser une déclaration dénuée d'ambiguïté, par exemple au moyen du formulaire ci-dessous, à
+    <a href="mailto:{{ LEGAL.contact_email }}">{{ LEGAL.contact_email }}</a>, qui la transmet au professeur. Le remboursement intervient
+    dans les 14 jours, par le même moyen de paiement.</p>
+  <p><strong>Professeur particulier.</strong> Le contrat est conclu entre deux particuliers : le droit de rétractation prévu par le Code de la consommation
+    ne s'applique pas. Les conditions d'annulation des articles 5 et 6 restent applicables.</p>
+
+  <h3>Formulaire de rétractation</h3>
+  <p class="box">À l'attention de {{ LEGAL.editor_name }}, pour le compte du professeur concerné, {{ LEGAL.editor_address }},
+    {{ LEGAL.contact_email }} :<br>
+    Je vous notifie par la présente ma rétractation du contrat portant sur la prestation de services ci-dessous :<br>
+    Cours : … · Professeur : … · Date(s) de la séance : …<br>
+    Réservé le : … · Numéro de commande : …<br>
+    Nom du titulaire du compte : … · Adresse e-mail du compte : …<br>
+    Date : …</p>
+
+  <h2>8. Déroulement des séances</h2>
+  <p>Les séances en ligne ont lieu par la visioconférence du site, qui nécessite un navigateur récent, une caméra et un micro.
+    Les séances en présentiel ont lieu dans la ville indiquée, à une adresse convenue entre le professeur et le titulaire du compte.</p>
+
+  <h2>9. Justificatifs</h2>
+  <p>Pour chaque réservation payée, la plateforme établit au nom et pour le compte du professeur une facture (professeur micro-entrepreneur)
+    ou un reçu (professeur particulier), et un avoir en cas de remboursement. En utilisant la plateforme, le professeur lui donne mandat
+    d'établir ces documents en son nom (article 289 du Code général des impôts).</p>
+
+  <h2>10. Conditions propres aux professeurs</h2>
+  <ul>
+    <li>Pour proposer des cours payants, le professeur ouvre un compte de paiement auprès de Stripe. Les services de paiement sont fournis par Stripe
+      et soumis à l'<a href="https://stripe.com/legal/connect-account" rel="noopener">accord sur les comptes connectés Stripe</a>, qui inclut les conditions
+      d'utilisation de Stripe ; en activant les paiements, le professeur accepte ces conditions. Il autorise la plateforme à transmettre à Stripe
+      les informations nécessaires sur les réservations.</li>
+    <li>La commission de {{ PLATFORM_FEE_PERCENT }} % est prélevée sur chaque séance payée. En cas de remboursement, la commission est elle aussi remboursée
+      et le montant de la séance est repris sur le compte Stripe du professeur.</li>
+    <li>Les virements vers le compte bancaire du professeur sont effectués par Stripe selon son calendrier.</li>
+  </ul>
+
+  <h2 id="reclamations">11. Réclamations</h2>
+  <p>Toute réclamation peut être adressée via le <a href="{{ url_for('signaler') }}">formulaire de signalement</a> ou à
+    <a href="mailto:{{ LEGAL.contact_email }}">{{ LEGAL.contact_email }}</a>. La plateforme facilite la résolution du différend entre l'élève
+    et le professeur et peut décider d'un remboursement dans les cas prévus aux articles 5 à 7.</p>
+
+  <h2 id="mediation">12. Médiation de la consommation</h2>
+  <p>Après une réclamation écrite restée sans réponse satisfaisante, le consommateur peut saisir gratuitement le médiateur de la consommation
+    (articles L. 611-1 et suivants du Code de la consommation) :</p>
+  <p>{{ LEGAL.mediator_name }} · {{ LEGAL.mediator_address }} · {{ LEGAL.mediator_url }}</p>
+
+  <h2>13. Droit applicable</h2>
+  <p>Les présentes conditions sont soumises au droit français. Les règles de compétence sont précisées à l'article 15 des
+    <a href="{{ url_for('cgu') }}">conditions générales d'utilisation</a>.</p>
+</div>
+{% endblock %}

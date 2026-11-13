@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Données personnelles et cookies · {{ SITE_NAME }}{% endblock %}
+{% block content %}
+<div class="prose">
+  <h1>Données personnelles et cookies</h1>
+  <p class="updated">Version du {{ TERMS_DATE }}. Informations fournies en application des articles 13 et 14 du règlement (UE) 2016/679 (RGPD).</p>
+
+  <h2>Responsable du traitement</h2>
+  <p>{{ LEGAL.editor_name }}, {{ LEGAL.editor_address }}. Pour toute question ou demande relative à vos données :
+    <a href="mailto:{{ LEGAL.privacy_email }}">{{ LEGAL.privacy_email }}</a>.</p>
+
+  <h2>Données traitées, finalités et durées de conservation</h2>
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>Données</th><th>Pourquoi</th><th>Base légale</th><th>Durée</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Compte : nom, e-mail, mot de passe (stocké sous forme chiffrée irréversible), type de compte, date d'acceptation des conditions</td>
+          <td>Créer et sécuriser votre compte</td><td>Exécution du contrat (CGU)</td>
+          <td>Tant que le compte existe ; suppression automatique après 3 ans sans connexion</td>
+        </tr>
+        <tr>
+          <td>Profil : photo, présentation, classe ou niveau d'études ; pour les professeurs, statut et numéro SIRET</td>
+          <td>Présenter les professeurs aux élèves, et l'élève à ses professeurs</td><td>Exécution du contrat ; obligation légale d'informer sur le statut du vendeur (C. conso. art. L. 111-7)</td>
+          <td>Tant que le compte existe</td>
+        </tr>
+        <tr>
+          <td>Réservations, commandes, justificatifs, remboursements</td>
+          <td>Gérer les séances et les paiements</td><td>Exécution du contrat ; obligation légale (comptabilité)</td>
+          <td>10 ans (article L. 123-22 du Code de commerce), sous forme anonymisée si le compte est supprimé</td>
+        </tr>
+        <tr>
+          <td>Sommes perçues par les professeurs</td>
+          <td>Récapitulatif annuel et déclaration à l'administration fiscale</td><td>Obligation légale (CGI art. 242 bis ; directive (UE) 2021/514)</td>
+          <td>10 ans</td>
+        </tr>
+        <tr id="messagerie">
+          <td>Messages et pièces jointes</td>
+          <td>Permettre les échanges entre élève et professeur ; modération en cas de signalement, de suspicion de fraude ou de danger pour un mineur
+            (consultation sur motif, journalisée)</td>
+          <td>Exécution du contrat ; intérêt légitime (sécurité des élèves mineurs, prévention de la fraude)</td>
+          <td>Tant que le compte existe ; supprimés avec le compte</td>
+        </tr>
+        <tr>
+          <td>Visioconférence : données techniques de connexion échangées entre les navigateurs ; dessins du tableau partagé</td>
+          <td>Établir l'appel ; afficher le tableau</td><td>Exécution du contrat</td>
+          <td>Données techniques : 24 heures ; tableau : 30 jours. Le son et l'image ne transitent pas par nos serveurs et ne sont jamais enregistrés.</td>
+        </tr>
+        <tr>
+          <td>Notes attribuées aux professeurs</td>
+          <td>Afficher une note moyenne vérifiée</td><td>Intérêt légitime (information des élèves)</td><td>Tant que le compte existe</td>
+        </tr>
+        <tr>
+          <td>Signalements (motif, description, e-mail facultatif)</td>
+          <td>Traiter les signalements de contenus et les réclamations</td><td>Obligation légale (règlement (UE) 2022/2065) ; intérêt légitime</td>
+          <td>1 an après la clôture</td>
+        </tr>
+        <tr>
+          <td>Journal de sécurité : actions sensibles, adresse IP</td>
+          <td>Sécurité du service, preuve en cas de litige</td><td>Intérêt légitime (sécurité)</td><td>1 an</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p>Nous ne vendons aucune donnée, ne faisons pas de publicité et ne mesurons pas l'audience du site.</p>
+
+  <h2>Paiements</h2>
+  <p>Les données de carte bancaire sont saisies directement sur la page de Stripe et ne nous parviennent jamais. Pour les professeurs,
+    Stripe recueille lui-même l'identité, l'adresse et les coordonnées bancaires, comme l'exige la réglementation sur la lutte contre le
+    blanchiment. Stripe agit pour ces données en tant que responsable de traitement distinct :
+    <a href="https://stripe.com/privacy" rel="noopener">politique de confidentialité de Stripe</a>.</p>
+
+  <h2>Destinataires</h2>
+  <ul>
+    <li>L'équipe de {{ SITE_NAME }}, dans la limite de ses missions.</li>
+    <li>Les autres utilisateurs, pour les informations de profil publiées et les échanges liés à une réservation.</li>
+    <li>Notre hébergeur, {{ LEGAL.host_name }} (sous-traitant), serveurs situés : {{ LEGAL.host_location }}.</li>
+    <li>Stripe Payments Europe, Limited (Irlande) pour les paiements.</li>
+    <li>Pour établir les appels vidéo, votre navigateur interroge un serveur de découverte réseau (STUN) qui voit votre adresse IP :
+      {% for u in stun_urls %}<code>{{ u }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.</li>
+    <li>L'administration fiscale, pour les informations prévues par la loi.</li>
+  </ul>
+
+  <h2>Transferts hors de l'Union européenne</h2>
+  <p>Stripe et Google (serveur STUN par défaut) peuvent traiter des données aux États-Unis. Ces transferts sont encadrés par la décision
+    d'adéquation de la Commission européenne du 10 juillet 2023 (EU-US Data Privacy Framework) et, à défaut, par des clauses contractuelles types.</p>
+
+  <h2 id="cookies">Cookies</h2>
+  <p>Le site n'utilise qu'un seul cookie, strictement nécessaire à son fonctionnement : le cookie de session, qui vous garde connecté
+    et protège les formulaires contre les requêtes frauduleuses. Il expire au plus tard 12 heures après la connexion. Ce cookie est exempté
+    de consentement (article 82 de la loi Informatique et Libertés) ; c'est pourquoi aucun bandeau ne vous est présenté.
+    Aucun cookie publicitaire ou de mesure d'audience n'est déposé. Les polices de caractères sont celles de votre appareil :
+    aucune ressource n'est chargée depuis un site tiers.</p>
+  <p>La page de paiement, hébergée par Stripe sur checkout.stripe.com, dépose ses propres cookies, nécessaires à la prévention de la fraude.</p>
+
+  <h2>Élèves mineurs</h2>
+  <p>Le compte d'un élève mineur est créé par son parent ou représentant légal, qui exerce les droits ci-dessous pour son compte.
+    Nous recommandons de ne publier ni photo ni information permettant d'identifier ou de localiser un enfant.</p>
+
+  <h2>Sécurité</h2>
+  <p>Connexion chiffrée (HTTPS), mots de passe hachés, limitation des tentatives de connexion, protection contre les requêtes intersites,
+    politique de sécurité du contenu stricte, nettoyage des métadonnées des images envoyées, accès aux fichiers limité aux personnes concernées,
+    journalisation des actions sensibles.</p>
+
+  <h2>Vos droits</h2>
+  <p>Vous disposez des droits d'accès, de rectification, d'effacement, de limitation, d'opposition et de portabilité de vos données,
+    ainsi que du droit de définir des directives sur leur sort après votre décès. Depuis « Mon compte », vous pouvez télécharger vos données
+    et supprimer votre compte. Pour les autres demandes : <a href="mailto:{{ LEGAL.privacy_email }}">{{ LEGAL.privacy_email }}</a>.
+    Nous répondons dans un délai d'un mois.</p>
+  <p>Vous pouvez introduire une réclamation auprès de la CNIL, 3 place de Fontenoy, TSA 80715, 75334 Paris Cedex 07,
+    <a href="https://www.cnil.fr" rel="noopener">www.cnil.fr</a>.</p>
+</div>
+{% endblock %}

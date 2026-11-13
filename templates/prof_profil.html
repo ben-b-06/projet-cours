@@ -1,42 +1,51 @@
 {% extends "base.html" %}
-{% import "_macros.html" as macros %}
+{% import "_macros.html" as m %}
+{% block title %}Mon profil · {{ SITE_NAME }}{% endblock %}
 {% block content %}
-  <span class="eyebrow">Professeur / Mon profil</span>
-  <div class="card form-card wide">
-    <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Modifier mon profil</h2>
-
-    <div class="profile-current">
-      {{ macros.avatar(user['name'], user['photo'], 72) }}
-      <div>
-        <span class="teacher-name" style="font-size:1rem;">{{ user['name'] }}</span>
-        <p class="mono" style="font-size:0.8rem;color:var(--text-muted);margin:0.2rem 0 0;">{{ user['email'] }}</p>
-      </div>
+<div class="form-medium">
+  <h1>Mon profil de professeur</h1>
+  <p class="muted">Ces informations apparaissent sur vos cours. Votre adresse e-mail ({{ user['email'] }}) n'est jamais affichée.</p>
+  <form method="post" enctype="multipart/form-data" class="box">
+    {{ m.csrf() }}
+    <div class="field">
+      <span class="teacher">{{ m.avatar(user['name'], user['photo'], 80) }}<span><strong>{{ user['name'] }}</strong></span></span>
+    </div>
+    <div class="field">
+      <label for="photo">Photo</label>
+      <input type="file" id="photo" name="photo" accept="image/jpeg,image/png,image/webp">
+      <p class="hint">JPG, PNG ou WEBP, 8 Mo maximum. La photo est redimensionnée et ses métadonnées (lieu, appareil) sont supprimées.</p>
+      {% if user['photo'] %}<label class="check"><input type="checkbox" name="remove_photo" value="1"> Supprimer ma photo</label>{% endif %}
     </div>
 
-    <form method="post" enctype="multipart/form-data">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <div class="field">
-        <label>Photo de profil</label>
-        <input type="file" name="photo" accept=".jpg,.jpeg,.png,.webp">
-        <p class="slot-help">JPG, PNG ou WEBP, 5 Mo maximum. Laissez vide pour conserver la photo actuelle.</p>
-      </div>
+    <fieldset>
+      <legend>Statut</legend>
+      {% for key, label in TEACHER_STATUSES.items() %}
+        <label class="check"><input type="radio" name="teacher_status" value="{{ key }}" required{% if user['teacher_status'] == key %} checked{% endif %}> {{ label }}</label>
+      {% endfor %}
+      <p class="hint">Cette information est montrée aux élèves avant la réservation (obligation légale des plateformes).
+        Si vous donnez des cours régulièrement contre rémunération, vous devez déclarer une activité (micro-entreprise par exemple) :
+        voir <a href="https://www.autoentrepreneur.urssaf.fr" rel="noopener">autoentrepreneur.urssaf.fr</a>.</p>
+    </fieldset>
 
-      <div class="field">
-        <label>Niveau d'étude</label>
-        <select name="education_level">
-          <option value="" {{ 'selected' if not user['education_level'] else '' }}>Non renseigné</option>
-          {% for n in niveaux_etude %}
-            <option value="{{ n }}" {{ 'selected' if user['education_level'] == n else '' }}>{{ n }}</option>
-          {% endfor %}
-        </select>
-      </div>
+    <div class="field" data-show-when="teacher_status:micro" data-required-when-shown>
+      <label for="siret">Numéro SIRET</label>
+      <input type="text" id="siret" name="siret" inputmode="numeric" value="{{ user['siret'] or '' }}" maxlength="17">
+      <p class="hint">14 chiffres. Il figure sur les justificatifs remis aux élèves.</p>
+    </div>
 
-      <div class="field">
-        <label>Description</label>
-        <textarea name="bio" rows="5" placeholder="Présentez-vous aux élèves : votre parcours, vos matières, votre approche pédagogique…">{{ user['bio'] or '' }}</textarea>
-      </div>
-
-      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;margin-top:0.6rem;">Enregistrer mon profil</button>
-    </form>
-  </div>
+    <div class="field">
+      <label for="education_level">Niveau d'études</label>
+      <select id="education_level" name="education_level">
+        <option value="">Non renseigné</option>
+        {% for n in niveaux_etude %}<option value="{{ n }}"{% if user['education_level'] == n %} selected{% endif %}>{{ n }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="bio">Présentation</label>
+      <textarea id="bio" name="bio" rows="6" maxlength="1500">{{ user['bio'] or '' }}</textarea>
+      <p class="hint">Votre parcours, les matières que vous préférez, votre façon de travailler. N'indiquez pas de coordonnées personnelles.</p>
+    </div>
+    <button class="btn" type="submit">Enregistrer</button>
+  </form>
+</div>
 {% endblock %}

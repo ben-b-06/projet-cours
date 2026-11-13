@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Signaler un contenu · {{ SITE_NAME }}{% endblock %}
+{% block content %}
+<div class="form-medium">
+  <h1>Signaler un contenu ou un problème</h1>
+  <p>Utilisez ce formulaire pour signaler un contenu illicite (profil, cours, message), un comportement inapproprié,
+    ou un problème avec une séance ou un paiement. En cas de danger immédiat, appelez le 17 ; pour un enfant en danger, le 119.</p>
+  <form method="post" class="box">
+    {{ m.csrf() }}
+    {% if item %}
+      <input type="hidden" name="seance" value="{{ item['id'] }}">
+      <p class="notice">Séance concernée : {{ item['course_title'] }}, {{ item['slot_date'] }} à {{ item['slot_time'] }}.</p>
+    {% endif %}
+    <div class="field">
+      <label for="category">Motif</label>
+      <select id="category" name="category" required>
+        <option value="">Choisir…</option>
+        {% for key, label in categories.items() %}
+          <option value="{{ key }}"{% if form.get('category') == key or (item and not form.get('category') and key == 'seance') %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="location">Où se trouve le contenu ? <span class="muted">(lien, nom du professeur ou du cours)</span></label>
+      <input type="text" id="location" name="location" value="{{ form.get('location', '') }}" maxlength="300">
+    </div>
+    <div class="field">
+      <label for="description">Description</label>
+      <textarea id="description" name="description" rows="6" maxlength="3000" required>{{ form.get('description', '') }}</textarea>
+      <p class="hint">Expliquez pourquoi le contenu vous paraît illicite ou ce qui s'est passé.</p>
+    </div>
+    {% if not current_user %}
+      <div class="row">
+        <div class="field">
+          <label for="name">Nom <span class="muted">(facultatif)</span></label>
+          <input type="text" id="name" name="name" value="{{ form.get('name', '') }}" maxlength="80">
+        </div>
+        <div class="field">
+          <label for="email">E-mail <span class="muted">(pour recevoir la suite donnée)</span></label>
+          <input type="email" id="email" name="email" value="{{ form.get('email', '') }}" maxlength="254">
+        </div>
+      </div>
+    {% endif %}
+    <label class="check"><input type="checkbox" name="good_faith" value="1" required>
+      <span>Je certifie de bonne foi que les informations fournies sont exactes et complètes.</span></label>
+    <button class="btn" type="submit">Envoyer le signalement</button>
+  </form>
+</div>
+{% endblock %}

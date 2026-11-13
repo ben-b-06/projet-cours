@@ -1,27 +1,21 @@
 {% extends "base.html" %}
+{% block title %}Modération · Administration{% endblock %}
 {% block content %}
-  <span class="eyebrow">Administration / Messagerie</span>
-  <h2 style="font-size:1.5rem;margin:0 0 0.4rem;">Toutes les conversations</h2>
-  <p style="color:var(--text-muted);font-size:0.9rem;margin:0 0 1.6rem;">
-    En tant qu'administrateur, vous pouvez consulter (en lecture seule) les échanges entre chaque élève et chaque professeur.
-  </p>
-
-  {% if conversations %}
-  <div class="card" style="overflow:hidden;">
-    {% for c in conversations %}
-    <a href="{{ url_for('admin_messagerie_thread', student_id=c['student_id'], teacher_id=c['teacher_id']) }}"
-       class="msg-contact" style="border-bottom:1px solid var(--border);">
-      <span class="msg-contact-top">
-        <span class="msg-contact-name">{{ c['student_name'] }} ↔ {{ c['teacher_name'] }}</span>
-        <span class="mono" style="font-size:0.72rem;color:var(--text-muted);">{{ c['message_count'] }} message(s)</span>
-      </span>
-      <span class="msg-contact-preview">
-        {% if c['last_body'] %}{{ c['last_body'][:70] }}{% if c['last_body']|length > 70 %}…{% endif %}{% else %}Aucun message pour le moment{% endif %}
-      </span>
-    </a>
-    {% endfor %}
-  </div>
+<h1>Modération des conversations</h1>
+<p class="muted">La lecture d'une conversation n'est permise que pour un motif précis : signalement, suspicion de fraude, protection d'un mineur.
+  Chaque consultation est enregistrée dans le journal avec son motif.</p>
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>Élève</th><th>Professeur</th><th class="num">Messages</th><th>Dernier message</th><th></th></tr></thead>
+  <tbody>
+  {% for c in conversations %}
+    <tr>
+      <td>{{ c['student_name'] }}</td><td>{{ c['teacher_name'] }}</td><td class="num">{{ c['message_count'] }}</td>
+      <td class="nowrap">{{ c['last_at']|date_fr if c['last_at'] else '—' }}</td>
+      <td><a href="{{ url_for('admin_messagerie_thread', student_id=c['student_id'], teacher_id=c['teacher_id']) }}">Consulter…</a></td>
+    </tr>
   {% else %}
-  <div class="empty-state">Aucune mise en relation élève/professeur pour le moment.</div>
-  {% endif %}
+    <tr><td colspan="5" class="muted">Aucune conversation.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
 {% endblock %}

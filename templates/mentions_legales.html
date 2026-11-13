@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Mentions légales · {{ SITE_NAME }}{% endblock %}
+{% block content %}
+<div class="prose">
+  <h1>Mentions légales</h1>
+  <p class="updated">En application de la loi n° 2004-575 du 21 juin 2004 pour la confiance dans l'économie numérique.</p>
+
+  <h2>Éditeur du site</h2>
+  <dl class="facts">
+    <dt>Nom</dt><dd>{{ LEGAL.editor_name }}</dd>
+    <dt>Forme juridique</dt><dd>{{ LEGAL.editor_form }}</dd>
+    {% if LEGAL.editor_capital %}<dt>Capital social</dt><dd>{{ LEGAL.editor_capital }}</dd>{% endif %}
+    <dt>Adresse</dt><dd>{{ LEGAL.editor_address }}</dd>
+    <dt>Immatriculation</dt><dd>{{ LEGAL.editor_id }}</dd>
+    {% if LEGAL.editor_vat %}<dt>N° de TVA</dt><dd>{{ LEGAL.editor_vat }}</dd>{% endif %}
+    <dt>E-mail</dt><dd><a href="mailto:{{ LEGAL.contact_email }}">{{ LEGAL.contact_email }}</a></dd>
+    <dt>Téléphone</dt><dd>{{ LEGAL.contact_phone }}</dd>
+    <dt>Directeur de la publication</dt><dd>{{ LEGAL.publication_director }}</dd>
+  </dl>
+
+  <h2>Hébergement</h2>
+  <dl class="facts">
+    <dt>Hébergeur</dt><dd>{{ LEGAL.host_name }}</dd>
+    <dt>Adresse</dt><dd>{{ LEGAL.host_address }}</dd>
+    <dt>Téléphone</dt><dd>{{ LEGAL.host_phone }}</dd>
+    <dt>Localisation des serveurs</dt><dd>{{ LEGAL.host_location }}</dd>
+  </dl>
+
+  <h2>Paiements</h2>
+  <p>Les paiements sont traités par Stripe Payments Europe, Limited, établissement de monnaie électronique agréé par la Banque centrale
+    d'Irlande (1 Grand Canal Street Lower, Grand Canal Dock, Dublin D02 H210, Irlande). Les sommes payées par les élèves sont encaissées
+    pour le compte des professeurs ; {{ SITE_NAME }} ne détient pas de fonds pour le compte de ses utilisateurs.</p>
+
+  <h2>Activité</h2>
+  <p>{{ SITE_NAME }} est une plateforme de mise en relation entre des professeurs particuliers et des élèves. Les cours sont donnés
+    par les professeurs, sous leur responsabilité ; la plateforme n'est pas partie au contrat de cours.
+    Voir les <a href="{{ url_for('cgu') }}">conditions générales d'utilisation</a> et les <a href="{{ url_for('cgv') }}">conditions générales de vente</a>.</p>
+
+  <h2>Signaler un contenu</h2>
+  <p>Tout contenu illicite peut être signalé au moyen du <a href="{{ url_for('signaler') }}">formulaire de signalement</a>
+    ou par e-mail à <a href="mailto:{{ LEGAL.contact_email }}">{{ LEGAL.contact_email }}</a>. Ce même point de contact peut être utilisé
+    par les autorités (règlement (UE) 2022/2065, art. 11 et 12). Langues acceptées : français, anglais.</p>
+
+  <h2>Propriété intellectuelle</h2>
+  <p>Les textes, la mise en page et le logiciel du site sont protégés par le droit d'auteur. Les contenus publiés par les utilisateurs
+    (descriptions de cours, présentations, photos) restent leur propriété ; ils concèdent à l'éditeur le droit de les afficher sur le site
+    pour la durée de leur publication.</p>
+
+  <h2>Données personnelles</h2>
+  <p>Voir la <a href="{{ url_for('confidentialite') }}">politique de confidentialité et de cookies</a>.</p>
+</div>
+{% endblock %}

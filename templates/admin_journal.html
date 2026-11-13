@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Journal · Administration{% endblock %}
+{% block content %}
+<h1>Journal des actions</h1>
+<p class="small muted">Actions sensibles (administration, paiements, consultation de conversations). Conservé un an, puis supprimé automatiquement.</p>
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>Date</th><th>Auteur</th><th>Action</th><th>Objet</th><th>Détail</th><th>IP</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td class="nowrap">{{ r['created_at']|date_fr }}</td>
+      <td>{{ r['actor_name'] or 'système' }}</td>
+      <td>{{ r['action'] }}</td>
+      <td>{{ r['target'] or '' }}</td>
+      <td>{{ r['details'] or '' }}</td>
+      <td class="small muted">{{ r['ip'] or '' }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="muted">Journal vide.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}

@@ -1,5 +1,7 @@
-Flask>=3.0
-gunicorn
-stripe>=9.0
-Flask-WTF>=1.2
+Flask>=3.1,<4
+Flask-WTF>=1.2,<2
+gunicorn>=22
+stripe>=17,<18
 reportlab>=4.0
+Pillow>=11
+tzdata

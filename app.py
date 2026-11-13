@@ -1,128 +1,324 @@
+"""La Communauté du Savoir : plateforme de mise en relation entre professeurs
+particuliers et élèves (Flask + SQLite).
+
+Principes de cette version :
+
+* Paiements : la plateforme ne détient jamais l'argent des utilisateurs.
+  L'élève paie chaque réservation par carte via Stripe Checkout ; le paiement
+  est encaissé par Stripe pour le compte du professeur (Stripe Connect,
+  « destination charge » avec on_behalf_of). Seule la commission de la
+  plateforme est versée sur le compte Stripe de la plateforme. Il n'y a plus
+  de porte-monnaie interne, de séquestre ni de demandes de retrait : la
+  détention de fonds pour le compte de tiers est une activité réservée aux
+  établissements agréés (Code monétaire et financier, art. L. 521-2 et
+  L. 525-3). Les remboursements passent par l'API Stripe (reverse transfer).
+* Sécurité : CSP stricte sans script en ligne, jeton CSRF sur toutes les
+  requêtes modifiantes (y compris les appels fetch), sessions invalidées au
+  changement de mot de passe, téléversements ré-encodés, limitation de débit.
+* RGPD : données minimales, durées de conservation appliquées par une tâche
+  de maintenance, export et suppression du compte en libre-service.
+
+Configuration : voir README.md (variables d'environnement).
+"""
+
+import calendar as calendar_mod
+import hashlib
+import hmac
+import json
 import os
 import re
-import json
 import secrets
+import sqlite3
 import threading
 import time as time_mod
-import calendar as calendar_mod
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from functools import wraps
 from io import BytesIO
-import sqlite3
+from urllib.parse import urlparse
+from xml.sax.saxutils import escape as xml_escape
+from zoneinfo import ZoneInfo
 
 import stripe
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g, jsonify, send_from_directory, send_file, abort
-from werkzeug.security import generate_password_hash, check_password_hash
+from flask import (
+    Flask,
+    abort,
+    flash,
+    g,
+    has_request_context,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    send_from_directory,
+    session,
+    url_for,
+)
 from flask_wtf import CSRFProtect
+from flask_wtf.csrf import CSRFError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import check_password_hash, generate_password_hash
 
+
+def env_flag(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on", "oui")
+
+
+def env_str(name, default=""):
+    value = os.environ.get(name)
+    return value.strip() if value and value.strip() else default
+
+
+# ---------------------------------------------------------------------------
+# Chemins et réglages généraux
+# ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = "/var/data"
+DATA_DIR = env_str("DATA_DIR", "/var/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "coursconnect.db")
-PROFILE_PHOTOS_DIR = os.path.join(DATA_DIR, "uploads", "profils")
-ALLOWED_PHOTO_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
+UPLOADS_DIR = os.path.join(DATA_DIR, "uploads")
+PROFILE_PHOTOS_DIR = os.path.join(UPLOADS_DIR, "profils")
+MESSAGE_ATTACHMENTS_DIR = os.path.join(UPLOADS_DIR, "messagerie")
 
-# Pièces jointes de la messagerie (images et PDF uniquement).
-MESSAGE_ATTACHMENTS_DIR = os.path.join(DATA_DIR, "uploads", "messagerie")
-ALLOWED_MESSAGE_IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "gif"}
-ALLOWED_MESSAGE_DOC_EXTENSIONS = {"pdf"}
-ALLOWED_MESSAGE_EXTENSIONS = ALLOWED_MESSAGE_IMAGE_EXTENSIONS | ALLOWED_MESSAGE_DOC_EXTENSIONS
-MAX_MESSAGE_ATTACHMENT_SIZE = 8 * 1024 * 1024  # 8 Mo max par pièce jointe
+PARIS = ZoneInfo("Europe/Paris")
+
+# FORCE_HTTPS=1 en production (site servi en HTTPS) : cookies Secure, HSTS.
+FORCE_HTTPS = env_flag("FORCE_HTTPS")
+# Nombre de proxys de confiance devant l'application (1 sur Render, Heroku,
+# derrière un Nginx…). Indispensable pour connaître la vraie IP du client
+# (limitation de débit) et le schéma https.
+# Par défaut : 1 si FORCE_HTTPS=1 (le HTTPS est presque toujours terminé par un proxy).
+TRUST_PROXY_HOPS = int(env_str("TRUST_PROXY_HOPS", "1" if FORCE_HTTPS else "0") or 0)
+# URL publique du site (ex. https://www.exemple.fr), utilisée pour les liens
+# de retour Stripe. Évite de dépendre de l'en-tête Host envoyé par le client.
+PUBLIC_BASE_URL = env_str("PUBLIC_BASE_URL").rstrip("/")
+# Noms d'hôte acceptés (ex. "www.exemple.fr,exemple.fr"). Vide = pas de contrôle.
+ALLOWED_HOSTS = [h.strip() for h in env_str("ALLOWED_HOSTS").split(",") if h.strip()]
+# Données de démonstration (comptes et cours fictifs) : jamais en production.
+DEMO_MODE = env_flag("SEED_DEMO_DATA")
+
+SITE_NAME = env_str("SITE_NAME", "La Communauté du Savoir")
 
 app = Flask(__name__)
+if TRUST_PROXY_HOPS > 0:
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUST_PROXY_HOPS, x_proto=TRUST_PROXY_HOPS)
+if ALLOWED_HOSTS:
+    app.config["TRUSTED_HOSTS"] = ALLOWED_HOSTS
 
 
-app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
-if not os.environ.get("FLASK_SECRET_KEY"):
-    print(
-        "ATTENTION : FLASK_SECRET_KEY n'est pas définie. Une clé temporaire "
-        "aléatoire a été générée pour cette exécution — définissez cette "
-        "variable d'environnement en production pour des sessions stables "
-        "et sécurisées."
-    )
+def _load_secret_key():
+    """Clé de signature des sessions. Si FLASK_SECRET_KEY n'est pas fournie,
+    une clé aléatoire est créée une seule fois dans DATA_DIR (droits 600) :
+    elle reste identique entre redémarrages et entre workers gunicorn."""
+    from_env = os.environ.get("FLASK_SECRET_KEY")
+    if from_env:
+        return from_env
+    path = os.path.join(DATA_DIR, ".flask_secret_key")
+    for _ in range(50):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            with open(path, encoding="ascii") as fh:
+                key = fh.read().strip()
+            if key:
+                return key
+            time_mod.sleep(0.05)  # un autre worker est en train de l'écrire
+            continue
+        key = secrets.token_hex(32)
+        with os.fdopen(fd, "w", encoding="ascii") as fh:
+            fh.write(key)
+        return key
+    raise RuntimeError("Impossible de lire ou de créer la clé secrète de session.")
 
-app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024  # 8 Mo max (photos de profil et pièces jointes de messagerie)
 
-# Durée de vie maximale d'une session : même si l'utilisateur reste actif,
-# le cookie de session expire au bout de 12h et il faut se reconnecter.
-# Limite l'impact d'un cookie de session volé (XSS, poste partagé oublié…).
-app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=12)
-
-# FAILLE CORRIGÉE : durcissement des cookies de session.
-# - HTTPONLY : empêche JavaScript (donc une éventuelle injection XSS) de lire le cookie de session.
-# - SAMESITE=Lax : limite l'envoi du cookie sur des requêtes cross-site (protection CSRF de base).
-# - SECURE : le cookie n'est envoyé que via HTTPS (activé via FLASK_ENV=production ou FORCE_HTTPS=1).
-app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-app.config["SESSION_COOKIE_SECURE"] = os.environ.get("FORCE_HTTPS", "0") == "1"
-
-# FAILLE CORRIGÉE : absence de protection CSRF sur les formulaires POST
-# (changement de mot de passe, suppression de compte/cours, retraits de
-# fonds, etc.). Flask-WTF ajoute un jeton CSRF vérifié sur chaque requête
-# POST/PUT/PATCH/DELETE ; les templates doivent inclure {{ csrf_token() }}
-# dans chaque formulaire (voir templates modifiés).
-app.config["WTF_CSRF_TIME_LIMIT"] = None
+app.secret_key = _load_secret_key()
+app.config.update(
+    MAX_CONTENT_LENGTH=9 * 1024 * 1024,
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=FORCE_HTTPS,
+    # Le préfixe __Host- interdit qu'un sous-domaine pose ou écrase le cookie.
+    SESSION_COOKIE_NAME="__Host-session" if FORCE_HTTPS else "session",
+    WTF_CSRF_TIME_LIMIT=None,
+)
 csrf = CSRFProtect(app)
+
+# ---------------------------------------------------------------------------
+# Informations légales (mentions légales, CGU, CGV, confidentialité)
+# ---------------------------------------------------------------------------
+# À renseigner par variables d'environnement (ou en modifiant les valeurs par
+# défaut ci-dessous). Tant qu'un champ obligatoire vaut TODO, il s'affiche
+# tel quel sur le site et l'administrateur voit un avertissement.
+TODO = "[à compléter]"
+LEGAL = {
+    "site_name": SITE_NAME,
+    "editor_name": env_str("LEGAL_EDITOR_NAME", TODO),
+    "editor_form": env_str("LEGAL_EDITOR_FORM", TODO),
+    "editor_address": env_str("LEGAL_EDITOR_ADDRESS", TODO),
+    "editor_id": env_str("LEGAL_EDITOR_ID", TODO),  # SIREN/SIRET, RCS ou n° RNA
+    "editor_capital": env_str("LEGAL_EDITOR_CAPITAL"),
+    "editor_vat": env_str("LEGAL_EDITOR_VAT"),
+    "publication_director": env_str("LEGAL_PUBLICATION_DIRECTOR", TODO),
+    "contact_email": env_str("LEGAL_CONTACT_EMAIL", "lacommunautedusavoir1@gmail.com"),
+    "contact_phone": env_str("LEGAL_CONTACT_PHONE", TODO),
+    "privacy_email": env_str("LEGAL_PRIVACY_EMAIL", env_str("LEGAL_CONTACT_EMAIL", "lacommunautedusavoir1@gmail.com")),
+    "host_name": env_str("LEGAL_HOST_NAME", TODO),
+    "host_address": env_str("LEGAL_HOST_ADDRESS", TODO),
+    "host_phone": env_str("LEGAL_HOST_PHONE", TODO),
+    "host_location": env_str("LEGAL_HOST_LOCATION", TODO),  # ex. « Union européenne (Francfort) »
+    "mediator_name": env_str("LEGAL_MEDIATOR_NAME", TODO),
+    "mediator_address": env_str("LEGAL_MEDIATOR_ADDRESS", TODO),
+    "mediator_url": env_str("LEGAL_MEDIATOR_URL", TODO),
+}
+LEGAL_MISSING = [k for k, v in LEGAL.items() if v == TODO]
+TERMS_VERSION = "2026-11-13"
+TERMS_DATE = "13 novembre 2026"
+
+# ---------------------------------------------------------------------------
+# Référentiels
+# ---------------------------------------------------------------------------
+MATIERES = ["Mathématiques", "Physique-Chimie", "SI", "Français", "SVT", "SES", "Histoire-Géographie"]
+NIVEAUX = ["6e", "5e", "4e", "3e", "2nde", "1re", "Terminale"]
+NIVEAUX_ETUDE_PROF = [
+    "Baccalauréat", "Prépa MP", "Prépa MPI", "Prépa PC", "Prépa PSI", "Prépa PT", "Prépa TSI",
+    "Prépa ECG", "Prépa littéraire", "Licence (Bac+3)", "Master (Bac+5)", "Doctorat",
+    "École d'ingénieur", "École de commerce", "Autre",
+]
+MODES = ["en_ligne", "presentiel", "les_deux"]
+MODE_LABELS = {"en_ligne": "En ligne", "presentiel": "En présentiel", "les_deux": "En ligne ou en présentiel"}
+
+# Statut déclaré par le professeur (information obligatoire des plateformes,
+# art. L. 111-7 du Code de la consommation : l'élève doit savoir s'il traite
+# avec un professionnel ou avec un particulier).
+TEACHER_STATUSES = {
+    "particulier": "Particulier (activité non professionnelle)",
+    "micro": "Micro-entrepreneur (franchise en base de TVA)",
+}
+PRO_STATUSES = {"micro"}
+
+# ---------------------------------------------------------------------------
+# Paiements (Stripe Connect)
+# ---------------------------------------------------------------------------
+STRIPE_SECRET_KEY = env_str("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = env_str("STRIPE_WEBHOOK_SECRET")
+STRIPE_CONNECT_WEBHOOK_SECRET = env_str("STRIPE_CONNECT_WEBHOOK_SECRET")
+stripe.api_key = STRIPE_SECRET_KEY
+
+PLATFORM_FEE_PERCENT = Decimal(env_str("PLATFORM_FEE_PERCENT", "10"))
+PLATFORM_FEE_BPS = int(PLATFORM_FEE_PERCENT * 100)  # 10 % -> 1000 points de base
+PRICE_MIN_CENTS = 500  # en dessous, les frais Stripe dépassent la commission
+PRICE_MAX_CENTS = 50000
+CANCELLATION_MIN_DELAY = timedelta(hours=12)
+WITHDRAWAL_PERIOD = timedelta(days=14)
+BOOKING_MIN_NOTICE = timedelta(hours=1)
+CHECKOUT_TTL = timedelta(minutes=31)  # Stripe impose au moins 30 minutes
+MAX_SLOTS_PER_BOOKING = 20
+MAX_SLOTS_PER_COURSE = 60
+
+# Limites de longueur des champs texte (anti-abus, base de données bornée).
+LIMITS = {
+    "name": 80, "email": 254, "title": 120, "description": 3000, "bio": 1500,
+    "notes": 500, "message": 4000, "city": 80, "report": 3000, "admin_note": 500,
+}
+# Mots interdits dans les noms d'utilisateur (usurpation de l'équipe).
+RESERVED_NAME_WORDS = ("admin", "modérat", "moderat", "équipe", "equipe", "support", SITE_NAME.lower())
+MIN_PASSWORD_LENGTH = 12
+MAX_PASSWORD_LENGTH = 128
+
+# Durées de conservation (RGPD) appliquées par la tâche de maintenance.
+RETENTION_SIGNALS = timedelta(days=1)
+RETENTION_WHITEBOARD = timedelta(days=30)
+RETENTION_AUDIT_LOG = timedelta(days=365)
+RETENTION_INACTIVE_ACCOUNT = timedelta(days=3 * 365)
+MAINTENANCE_INTERVAL_SECONDS = 60
+
+# Serveurs STUN utilisés par la visioconférence (découverte d'adresse réseau).
+WEBRTC_STUN_URLS = [u.strip() for u in env_str("WEBRTC_STUN_URLS", "stun:stun.l.google.com:19302").split(",") if u.strip()]
+
+# Images : ré-encodées à l'envoi (supprime les métadonnées EXIF, dont la
+# géolocalisation, et neutralise les fichiers piégés).
+Image.MAX_IMAGE_PIXELS = 40_000_000
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_PIXELS_ACCEPTED = 25_000_000
+ATTACHMENT_IMAGE_FORMATS = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp", "GIF": "png"}
+PROFILE_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP"}
+
+DEMO_ACCOUNTS = {
+    "camille@coursconnect.fr": "prof123",
+    "karim@coursconnect.fr": "prof123",
+    "lea@coursconnect.fr": "etu123",
+}
+DEMO_PASSWORD = "Demo-CoursConnect-2026"  # utilisé seulement si SEED_DEMO_DATA=1
+
+ADMIN_EMAIL = env_str("ADMIN_EMAIL", "admin@cours.fr").lower()
+
+
+# ---------------------------------------------------------------------------
+# En-têtes de sécurité
+# ---------------------------------------------------------------------------
+CONTENT_SECURITY_POLICY = "; ".join([
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "img-src 'self' data: blob:",
+    "media-src 'self' blob:",
+    "font-src 'self'",
+    "connect-src 'self'",
+    "frame-src 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self' https://checkout.stripe.com https://connect.stripe.com",
+    "frame-ancestors 'none'",
+] + (["upgrade-insecure-requests"] if FORCE_HTTPS else []))
 
 
 @app.after_request
 def set_security_headers(response):
-    """Ajoute des en-têtes HTTP de sécurité de base sur toutes les réponses."""
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    response.headers.setdefault("Permissions-Policy", "camera=(self), microphone=(self), geolocation=()")
-    # Politique de sécurité du contenu : limite les origines autorisées à charger
-    # des scripts/styles/images/polices, interdit les plugins (object-src) et le
-    # chargement de la page dans un <iframe> tiers (frame-ancestors). Les scripts
-    # et styles restent en 'unsafe-inline' car quelques templates utilisent encore
-    # des attributs on* / style="" en ligne — à terme, les migrer vers un nonce
-    # CSP permettrait de retirer 'unsafe-inline' de script-src.
-    response.headers.setdefault(
-        "Content-Security-Policy",
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-        "font-src 'self' https://fonts.gstatic.com; "
-        "img-src 'self' data:; "
-        "connect-src 'self'; "
-        "object-src 'none'; "
-        "base-uri 'self'; "
-        "form-action 'self'; "
-        "frame-ancestors 'none';",
+    headers = response.headers
+    headers.setdefault("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+    headers.setdefault("X-Content-Type-Options", "nosniff")
+    headers.setdefault("X-Frame-Options", "DENY")
+    headers.setdefault("Referrer-Policy", "same-origin")
+    headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+    headers.setdefault(
+        "Permissions-Policy",
+        "camera=(self), microphone=(self), geolocation=(), payment=(), usb=(), interest-cohort=()",
     )
-    # HSTS : n'a de sens que si le site est effectivement servi en HTTPS
-    # (FORCE_HTTPS=1) ; l'activer sans HTTPS casserait l'accès en clair.
-    if app.config["SESSION_COOKIE_SECURE"]:
-        response.headers.setdefault(
-            "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
-        )
+    if FORCE_HTTPS:
+        headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    # Pages personnelles : jamais en cache (poste partagé, bouton « précédent »).
+    if session.get("user_id") and response.mimetype in ("text/html", "application/json"):
+        headers["Cache-Control"] = "no-store"
     return response
 
 
 # ---------------------------------------------------------------------------
-# Limitation de débit (anti brute-force / anti-spam) — implémentation simple
-# en mémoire, par IP. Suffisant pour se protéger d'un bourrinage automatisé
-# basique ; pour un déploiement multi-workers/multi-serveurs en production,
-# préférer un stockage partagé (ex. Flask-Limiter + Redis).
+# Limitation de débit (en mémoire, par processus)
 # ---------------------------------------------------------------------------
 _rate_limit_lock = threading.Lock()
 _rate_limit_buckets = {}
 
 
-def _client_ip():
-    return request.remote_addr or "unknown"
+def client_ip():
+    return request.remote_addr or "inconnue"
 
 
 def is_rate_limited(key, max_attempts, window_seconds):
-    """Renvoie True si la clé donnée a dépassé max_attempts sur la fenêtre
-    glissante window_seconds (et enregistre la tentative courante sinon)."""
+    """True si `key` a dépassé max_attempts sur la fenêtre glissante ;
+    sinon enregistre la tentative et renvoie False."""
     now = time_mod.time()
     cutoff = now - window_seconds
     with _rate_limit_lock:
@@ -132,99 +328,153 @@ def is_rate_limited(key, max_attempts, window_seconds):
         if len(bucket) >= max_attempts:
             return True
         bucket.append(now)
-        # Purge occasionnelle des clés inactives pour éviter une fuite mémoire.
-        if len(_rate_limit_buckets) > 5000:
-            stale = [k for k, v in _rate_limit_buckets.items() if not v or v[-1] < cutoff]
-            for k in stale:
+        if len(_rate_limit_buckets) > 10000:
+            for k in [k for k, v in _rate_limit_buckets.items() if not v or v[-1] < cutoff]:
                 _rate_limit_buckets.pop(k, None)
         return False
 
 
-# Choix fermés pour la matière et le niveau scolaire (du collège au lycée)
-MATIERES = ["Mathématiques", "Physique-Chimie","SI", "Français", "SVT", "SES", "Histoire-Géographie"]
-NIVEAUX = ["6e", "5e", "4e", "3e", "2nde", "1re", "Terminale"]
-NIVEAUX_ETUDE_PROF = [
-    "Baccalauréat", "prepa MP", "prepa PC", "prepa TSI", "prepa PSI", "prepa PT", "prepa MPI", "prepa ECG", "prepa MP","prépa littéraire" ,"Licence (Bac+3)", "Master (Bac+5)",
-    "Doctorat", "École d'ingénieur", "École de commerce", "Autre"
-]
-
-# Modalité d'un cours : uniquement en ligne, uniquement en présentiel, ou les deux
-# (dans ce dernier cas, l'élève choisit la modalité pour chaque créneau qu'il réserve).
-MODES = ["en_ligne", "presentiel", "les_deux"]
-MODE_LABELS = {"en_ligne": "En ligne", "presentiel": "En présentiel", "les_deux": "En ligne ou en présentiel"}
-
-# Identifiants du compte administrateur unique — aucun autre admin ne peut être créé.
-# FAILLE CORRIGÉE : le mot de passe admin était écrit en clair dans le code
-# source, donc visible par quiconque consulte le dépôt public GitHub. Il doit
-# maintenant être fourni via les variables d'environnement ADMIN_EMAIL et
-# ADMIN_PASSWORD. Si ADMIN_PASSWORD est absente, un mot de passe aléatoire
-# est généré et affiché UNE SEULE FOIS au démarrage : notez-le immédiatement,
-# il ne sera plus jamais réaffiché.
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@cours.fr")
-_ADMIN_PASSWORD_ENV = os.environ.get("ADMIN_PASSWORD")
-ADMIN_PASSWORD = _ADMIN_PASSWORD_ENV or secrets.token_urlsafe(12)
-if not _ADMIN_PASSWORD_ENV:
-    print(
-        "=" * 70 + "\n"
-        "AUCUN ADMIN_PASSWORD fourni : mot de passe administrateur généré "
-        f"aléatoirement pour ce démarrage : {ADMIN_PASSWORD}\n"
-        "Notez-le maintenant : il ne sera plus jamais affiché. Définissez "
-        "la variable d'environnement ADMIN_PASSWORD pour fixer un mot de "
-        "passe stable en production.\n" + "=" * 70
-    )
-
-
 # ---------------------------------------------------------------------------
-# Paiements — Stripe + portefeuille interne + séquestre (escrow)
+# Outils divers
 # ---------------------------------------------------------------------------
-# Clés à définir en variables d'environnement (jamais en dur dans le code) :
-#   STRIPE_SECRET_KEY      -> clé secrète Stripe (sk_test_... / sk_live_...)
-#   STRIPE_PUBLISHABLE_KEY -> clé publique Stripe (pk_test_... / pk_live_...)
-#   STRIPE_WEBHOOK_SECRET  -> secret de signature du webhook (whsec_...)
-STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
-STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-stripe.api_key = STRIPE_SECRET_KEY
-
-# Montants de recharge proposés à l'élève, en euros.
-WALLET_TOPUP_AMOUNTS = [10,15, 20,25,30]
-
-# Délai laissé à l'élève, après la fin du cours, pour confirmer que tout
-# s'est bien passé ou pour demander un remboursement. Passé ce délai, le
-# paiement séquestré est automatiquement versé au professeur.
-PAYMENT_HOLD_DELAY = timedelta(hours=24)
-
-# Pourcentage prélevé par la plateforme (admin) sur chaque paiement versé au
-# professeur (transaction qui s'est déroulée correctement, càd confirmée par
-# l'élève ou libérée automatiquement). Les remboursements ne sont PAS soumis
-# à cette commission, puisque la transaction n'a pas été menée à son terme.
-ADMIN_COMMISSION_RATE = 0.10  # 10 %
-
-# Délai minimum avant le début d'une séance en dessous duquel ni le
-# professeur ni l'élève ne peuvent l'annuler.
-CANCELLATION_MIN_DELAY = timedelta(hours=12)
-
-# Intervalle (en secondes) entre deux passages du thread d'arrière-plan qui
-# libère automatiquement les paiements arrivés au bout de leur délai.
-AUTO_RELEASE_POLL_SECONDS = 60
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$")
+HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
-@app.template_filter("euros")
-def euros(cents):
-    """Formate un montant en centimes vers une chaîne '12,50 €'."""
-    if cents is None:
-        cents = 0
-    return f"{cents / 100:.2f}".replace(".", ",") + " €"
+def clean(value, max_len, multiline=False):
+    """Nettoie un champ texte : caractères de contrôle retirés, espaces
+    superflus supprimés, longueur bornée."""
+    value = (value or "").replace("\r\n", "\n").replace("\r", "\n")
+    value = _CONTROL_CHARS.sub("", value)
+    if not multiline:
+        value = " ".join(value.split())
+    return value.strip()[:max_len]
+
+
+def form_value(name, limit_key, multiline=False):
+    return clean(request.form.get(name, ""), LIMITS[limit_key], multiline)
+
+
+def now_local():
+    """Heure légale française (les créneaux sont saisis en heure de Paris)."""
+    return datetime.now(PARIS).replace(tzinfo=None)
+
+
+def utc_now():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def utc_now_str():
+    return utc_now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_db_utc(value):
+    try:
+        return datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_euros(raw):
+    """'25', '25,5', '25.50' -> centimes (int). Lève ValueError sinon."""
+    raw = (raw or "").strip().replace("€", "").replace(" ", "").replace(",", ".")
+    if not re.fullmatch(r"\d{1,5}(\.\d{1,2})?", raw):
+        raise ValueError("montant invalide")
+    return int((Decimal(raw) * 100).to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def platform_fee(amount_cents):
+    return (amount_cents * PLATFORM_FEE_BPS + 5000) // 10000
+
+
+def password_problem(password):
+    """Politique conforme à la recommandation CNIL n° 2022-100 (12 caractères,
+    3 types de caractères au moins, combinée à la limitation des tentatives)."""
+    if not (MIN_PASSWORD_LENGTH <= len(password) <= MAX_PASSWORD_LENGTH):
+        return f"Le mot de passe doit contenir entre {MIN_PASSWORD_LENGTH} et {MAX_PASSWORD_LENGTH} caractères."
+    kinds = sum([
+        bool(re.search(r"[a-z]", password)),
+        bool(re.search(r"[A-Z]", password)),
+        bool(re.search(r"\d", password)),
+        bool(re.search(r"[^a-zA-Z\d]", password)),
+    ])
+    if kinds < 3:
+        return "Le mot de passe doit mélanger au moins trois types de caractères : minuscules, majuscules, chiffres, caractères spéciaux."
+    return None
+
+
+def siret_is_valid(siret):
+    if not re.fullmatch(r"\d{14}", siret or ""):
+        return False
+    total = 0
+    for i, ch in enumerate(reversed(siret)):
+        n = int(ch)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0 or siret.startswith("356000000")  # exception La Poste
+
+
+def slot_start(slot):
+    return datetime.strptime(f"{slot['slot_date']} {str(slot['slot_time'])[:5]}", "%Y-%m-%d %H:%M")
+
+
+def slot_end(slot):
+    return slot_start(slot) + timedelta(minutes=int(slot["duration_minutes"]))
+
+
+def safe_slot_start(slot):
+    try:
+        return slot_start(slot)
+    except (TypeError, ValueError, KeyError):
+        return datetime.min
+
+
+def safe_slot_end(slot):
+    try:
+        return slot_end(slot)
+    except (TypeError, ValueError, KeyError):
+        return datetime.min
+
+
+def redirect_back(default):
+    """Retour à la page précédente, uniquement si elle est sur ce site."""
+    ref = request.referrer
+    if ref:
+        parsed = urlparse(ref)
+        if parsed.scheme in ("http", "https") and parsed.netloc == request.host and parsed.path.startswith("/"):
+            return redirect(parsed.path + (f"?{parsed.query}" if parsed.query else ""))
+    return redirect(default)
+
+
+def external_url(endpoint, **values):
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL + url_for(endpoint, **values)
+    return url_for(endpoint, _external=True, **values)
+
+
+def to_plain(obj):
+    """Objets Stripe -> dict Python (StripeObject n'est plus un dict)."""
+    return obj.to_dict() if hasattr(obj, "to_dict") else obj
 
 
 # ---------------------------------------------------------------------------
 # Base de données
 # ---------------------------------------------------------------------------
+def connect_db():
+    db = sqlite3.connect(DB_PATH, timeout=15)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA foreign_keys = ON")
+    db.execute("PRAGMA busy_timeout = 15000")
+    return db
+
+
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db = connect_db()
     return g.db
 
 
@@ -235,263 +485,278 @@ def close_db(exception=None):
         db.close()
 
 
-def init_db():
-    """Crée les tables si nécessaire et ajoute des données de démonstration."""
-    db = sqlite3.connect(DB_PATH)
-    db.execute("PRAGMA foreign_keys = ON")
-    db.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('admin', 'prof', 'etudiant')),
-            bio TEXT,
-            photo TEXT,
-            approved INTEGER NOT NULL DEFAULT 1,
-            stripe_account_id TEXT
-        );
+def table_columns(db, table):
+    return [row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()]
 
-        CREATE TABLE IF NOT EXISTS courses(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            subject TEXT NOT NULL,
-            level TEXT NOT NULL,
-            description TEXT NOT NULL,
-            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            mode TEXT NOT NULL DEFAULT 'en_ligne' CHECK(mode IN ('en_ligne', 'presentiel', 'les_deux')),
-            city TEXT
-        );
 
-        -- Chaque créneau se réserve individuellement : un cours peut donc être
-        -- suivi par plusieurs élèves différents, chacun sur son propre créneau.
-        CREATE TABLE IF NOT EXISTS slots(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-            slot_date TEXT NOT NULL,
-            slot_time TEXT NOT NULL,
-            duration_minutes INTEGER NOT NULL,
-            reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-            student_notes TEXT,
-            slot_mode TEXT
-        );
+def add_column(db, table, column, ddl):
+    if column not in table_columns(db, table):
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
-        -- Historique des mises en relation élève/prof : rempli dès qu'une
-        -- réservation est faite et jamais supprimé, pour permettre la
-        -- messagerie même après une éventuelle désinscription.
-        CREATE TABLE IF NOT EXISTS contacts(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            course_id INTEGER REFERENCES courses(id) ON DELETE SET NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(student_id, teacher_id)
-        );
 
-        CREATE TABLE IF NOT EXISTS messages(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            body TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            read_at TEXT,
-            -- Pièce jointe optionnelle (image ou PDF) attachée au message.
-            attachment_filename TEXT,
-            attachment_original_name TEXT,
-            attachment_type TEXT
-        );
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('admin', 'prof', 'etudiant')),
+    bio TEXT,
+    photo TEXT,
+    approved INTEGER NOT NULL DEFAULT 1,
+    stripe_account_id TEXT
+);
 
-        -- Petits messages techniques (offres/réponses SDP, candidats ICE) échangés
-        -- entre les deux participants d'un appel vidéo, relus par polling.
-        CREATE TABLE IF NOT EXISTS signals(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-            sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            type TEXT NOT NULL,
-            payload TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
+CREATE TABLE IF NOT EXISTS courses(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    level TEXT NOT NULL,
+    description TEXT NOT NULL,
+    teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL DEFAULT 'en_ligne' CHECK(mode IN ('en_ligne', 'presentiel', 'les_deux')),
+    city TEXT
+);
 
-        -- Traits dessinés sur le tableau blanc numérique partagé pendant une
-        -- visioconférence. Chaque ligne est soit un trait ('stroke', avec la
-        -- liste de points et le style en JSON dans `data`), soit un effacement
-        -- complet du tableau ('clear', `data` vide). Rejoués dans l'ordre par
-        -- polling, comme les signaux WebRTC ci-dessus, pour resynchroniser un
-        -- participant qui rejoint en cours de séance.
-        CREATE TABLE IF NOT EXISTS whiteboard_strokes(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-            slot_id INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
-            sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            kind TEXT NOT NULL DEFAULT 'stroke',
-            data TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
+CREATE TABLE IF NOT EXISTS slots(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    slot_date TEXT NOT NULL,
+    slot_time TEXT NOT NULL,
+    duration_minutes INTEGER NOT NULL,
+    reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    student_notes TEXT,
+    slot_mode TEXT
+);
 
-        -- Paiement séquestré (escrow) pour un créneau réservé et payé par un
-        -- élève. Le professeur n'est crédité qu'à la confirmation de l'élève,
-        -- au remboursement (annulation), ou automatiquement 24h après la fin
-        -- du cours si l'élève n'a rien fait entre-temps.
-        CREATE TABLE IF NOT EXISTS payments(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            slot_id INTEGER NOT NULL UNIQUE REFERENCES slots(id) ON DELETE CASCADE,
-            course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
-            student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            amount_cents INTEGER NOT NULL,
-            -- Part reversée au professeur et commission prélevée par la
-            -- plateforme (admin) au moment du versement (release). Restent
-            -- NULL tant que le paiement est en séquestre ou s'il est remboursé.
-            teacher_amount_cents INTEGER,
-            commission_cents INTEGER,
-            status TEXT NOT NULL DEFAULT 'held' CHECK(status IN ('held', 'released', 'refunded')),
-            release_at TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            resolved_at TEXT
-        );
+CREATE TABLE IF NOT EXISTS contacts(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    course_id INTEGER REFERENCES courses(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(student_id, teacher_id)
+);
 
-        -- Mouvements du portefeuille interne d'un utilisateur : recharges
-        -- Stripe, mises en séquestre, versements reçus, remboursements.
-        CREATE TABLE IF NOT EXISTS wallet_transactions(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            amount_cents INTEGER NOT NULL,
-            kind TEXT NOT NULL CHECK(kind IN ('topup', 'hold', 'release', 'refund', 'withdrawal')),
-            description TEXT,
-            stripe_session_id TEXT,
-            payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
+CREATE TABLE IF NOT EXISTS messages(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    read_at TEXT,
+    attachment_filename TEXT,
+    attachment_original_name TEXT,
+    attachment_type TEXT
+);
 
-        -- Demandes de retrait de fonds (admin, prof ou élève) : le montant est
-        -- débité du portefeuille dès la demande (mouvement 'withdrawal'), puis
-        -- un administrateur marque la demande comme payée ou la refuse (auquel
-        -- cas le montant est recrédité automatiquement).
-        CREATE TABLE IF NOT EXISTS withdrawals(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            amount_cents INTEGER NOT NULL,
-            method TEXT NOT NULL,
-            details TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'paid', 'rejected')),
-            admin_note TEXT,
-            wallet_transaction_id INTEGER REFERENCES wallet_transactions(id) ON DELETE SET NULL,
-            stripe_transfer_id TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            resolved_at TEXT
-        );
+CREATE TABLE IF NOT EXISTS signals(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
-        -- Note laissée par un élève sur un professeur avec qui un cours a été
-        -- réservé. Un élève ne peut laisser qu'une seule note par prof (elle est
-        -- mise à jour s'il note à nouveau). Seule la moyenne est visible par le
-        -- prof concerné : le détail des notes individuelles ne lui est jamais montré.
-        CREATE TABLE IF NOT EXISTS ratings(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
-            comment TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(student_id, teacher_id)
-        );
+CREATE TABLE IF NOT EXISTS whiteboard_strokes(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    slot_id INTEGER NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+    sender_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT 'stroke',
+    data TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
-        -- Réglages globaux du site (une seule ligne par clé).
-        CREATE TABLE IF NOT EXISTS settings(
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        """
-    )
+CREATE TABLE IF NOT EXISTS ratings(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    rating INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+    comment TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(student_id, teacher_id)
+);
 
-    # Réglage : qui peut s'inscrire sur le site.
-    #   - 'tous'  : professeurs ET élèves peuvent créer un compte (par défaut)
-    #   - 'profs' : seuls les professeurs peuvent s'inscrire
-    existing_setting = db.execute(
-        "SELECT value FROM settings WHERE key = 'registration_mode'"
-    ).fetchone()
-    if not existing_setting:
-        db.execute(
-            "INSERT INTO settings(key, value) VALUES ('registration_mode', 'tous')"
-        )
+CREATE TABLE IF NOT EXISTS settings(
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 
-    # Migrations : ajoute les colonnes introduites après la création initiale des
-    # tables, pour les bases existantes qui ne les ont pas encore.
-    user_columns = [row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()]
-    if "bio" not in user_columns:
-        db.execute("ALTER TABLE users ADD COLUMN bio TEXT")
-    if "photo" not in user_columns:
-        db.execute("ALTER TABLE users ADD COLUMN photo TEXT")
-    if "approved" not in user_columns:
-        # Les comptes déjà existants (créés avant l'ajout de la validation admin)
-        # restent approuvés automatiquement, seuls les nouveaux profs inscrits
-        # après cette migration devront être validés par l'administrateur.
-        db.execute("ALTER TABLE users ADD COLUMN approved INTEGER NOT NULL DEFAULT 1")
-    if "education_level" not in user_columns:
-        # Pour un professeur : son niveau d'étude (ex. Master, Doctorat...).
-        # Pour un élève : sa classe (ex. Terminale, 6e...).
-        db.execute("ALTER TABLE users ADD COLUMN education_level TEXT")
-    if "wallet_cents" not in user_columns:
-        # Solde du portefeuille interne (en centimes d'euro), utilisé aussi
-        # bien pour créditer un élève (recharge Stripe) que pour créditer un
-        # professeur (versement d'un cours confirmé/libéré automatiquement).
-        db.execute("ALTER TABLE users ADD COLUMN wallet_cents INTEGER NOT NULL DEFAULT 0")
-    if "stripe_account_id" not in user_columns:
-        db.execute("ALTER TABLE users ADD COLUMN stripe_account_id TEXT")
+-- Commandes : une réservation payée (ou gratuite) d'un ou plusieurs
+-- créneaux d'un même cours. Les informations utiles aux justificatifs sont
+-- copiées (nom, statut du professeur…) pour rester exactes même si un
+-- compte est supprimé : les pièces comptables se conservent 10 ans.
+CREATE TABLE IF NOT EXISTS orders(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    teacher_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    course_id INTEGER REFERENCES courses(id) ON DELETE SET NULL,
+    course_title TEXT NOT NULL,
+    student_name TEXT NOT NULL,
+    student_email TEXT NOT NULL,
+    teacher_name TEXT NOT NULL,
+    teacher_status TEXT,
+    teacher_siret TEXT,
+    amount_cents INTEGER NOT NULL,
+    platform_fee_cents INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'paid', 'partially_refunded', 'refunded', 'expired', 'canceled', 'free')),
+    stripe_checkout_session_id TEXT UNIQUE,
+    stripe_payment_intent_id TEXT,
+    stripe_account_id TEXT,
+    invoice_number TEXT,
+    waiver_accepted_at TEXT,
+    terms_version TEXT,
+    disputed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TEXT,
+    paid_at TEXT
+);
 
-    payment_columns = [row[1] for row in db.execute("PRAGMA table_info(payments)").fetchall()]
-    if "teacher_amount_cents" not in payment_columns:
-        db.execute("ALTER TABLE payments ADD COLUMN teacher_amount_cents INTEGER")
-    if "commission_cents" not in payment_columns:
-        db.execute("ALTER TABLE payments ADD COLUMN commission_cents INTEGER")
+CREATE TABLE IF NOT EXISTS order_items(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    slot_id INTEGER REFERENCES slots(id) ON DELETE SET NULL,
+    slot_date TEXT NOT NULL,
+    slot_time TEXT NOT NULL,
+    duration_minutes INTEGER NOT NULL,
+    slot_mode TEXT,
+    amount_cents INTEGER NOT NULL,
+    platform_fee_cents INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'paid', 'refunded', 'canceled', 'free')),
+    stripe_refund_id TEXT,
+    credit_note_number TEXT,
+    refunded_at TEXT,
+    refund_reason TEXT
+);
 
-    message_columns = [row[1] for row in db.execute("PRAGMA table_info(messages)").fetchall()]
-    if "attachment_filename" not in message_columns:
-        db.execute("ALTER TABLE messages ADD COLUMN attachment_filename TEXT")
-    if "attachment_original_name" not in message_columns:
-        db.execute("ALTER TABLE messages ADD COLUMN attachment_original_name TEXT")
-    if "attachment_type" not in message_columns:
-        db.execute("ALTER TABLE messages ADD COLUMN attachment_type TEXT")
+-- Numérotation continue des factures/reçus et avoirs, par professeur.
+CREATE TABLE IF NOT EXISTS doc_sequences(
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
 
-    course_columns_price = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
-    if "price_cents" not in course_columns_price:
-        # Prix d'une séance pour ce cours, en centimes d'euro.
-        db.execute("ALTER TABLE courses ADD COLUMN price_cents INTEGER NOT NULL DEFAULT 0")
+-- Événements Stripe déjà traités (les webhooks peuvent être rejoués).
+CREATE TABLE IF NOT EXISTS stripe_events(
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
-    slot_columns = [row[1] for row in db.execute("PRAGMA table_info(slots)").fetchall()]
-    if "reserved_by" not in slot_columns:
-        # BUG CORRIGÉ : cette colonne était historiquement ajoutée sans clause
-        # ON DELETE, contrairement au schéma de création (CREATE TABLE plus
-        # haut) qui prévoit ON DELETE SET NULL. Résultat : sur les bases
-        # ayant subi cette migration, supprimer un élève ou un professeur
-        # ayant un créneau réservé provoquait une erreur
-        # "FOREIGN KEY constraint failed" (PRAGMA foreign_keys = ON).
-        db.execute("ALTER TABLE slots ADD COLUMN reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL")
-    if "student_notes" not in slot_columns:
-        db.execute("ALTER TABLE slots ADD COLUMN student_notes TEXT")
-    if "slot_mode" not in slot_columns:
-        db.execute("ALTER TABLE slots ADD COLUMN slot_mode TEXT")
+-- Signalements (contenus illicites, litiges sur une séance) : dispositif de
+-- notification exigé par le règlement (UE) 2022/2065 (DSA), art. 16.
+CREATE TABLE IF NOT EXISTS reports(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reporter_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    reporter_name TEXT,
+    reporter_email TEXT,
+    category TEXT NOT NULL,
+    location TEXT,
+    description TEXT NOT NULL,
+    order_item_id INTEGER REFERENCES order_items(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'closed')),
+    admin_note TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TEXT
+);
 
-    # Anciennes bases : la colonne reserved_by a pu être ajoutée par la ligne
-    # ci-dessus AVANT ce correctif, sans clause ON DELETE. SQLite ne permet
-    # pas de modifier une contrainte de clé étrangère en place : on doit donc
-    # reconstruire la table slots si sa définition ne contient pas encore
-    # "ON DELETE SET NULL" pour reserved_by.
-    slots_schema_row = db.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'slots'"
-    ).fetchone()
-    if slots_schema_row and "reserved_by" in slots_schema_row[0] and "reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL" not in slots_schema_row[0]:
-        # Important : on NE renomme PAS `slots` en premier. Depuis SQLite
-        # 3.25, `ALTER TABLE ... RENAME` réécrit automatiquement les FK des
-        # tables qui référencent la table renommée (ex. payments.slot_id) ;
-        # si on part de "slots" → "slots_old", ces FK se retrouvent à
-        # pointer vers "slots_old", qui est ensuite supprimée : la relation
-        # est cassée. On crée donc la nouvelle table sous un autre nom,
-        # on supprime l'ancienne "slots" (les FK des autres tables ne sont
-        # réécrites que lors du RENAME, pas du DROP), puis on renomme la
-        # nouvelle table vers "slots" : les tables enfants, qui référencent
-        # déjà le nom "slots", restent valides.
+-- Journal des actions sensibles (administration, paiements, accès aux
+-- conversations). Conservé un an.
+CREATE TABLE IF NOT EXISTS audit_log(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    action TEXT NOT NULL,
+    target TEXT,
+    details TEXT,
+    ip TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ===== Ancien système de porte-monnaie (lecture seule) =====
+-- Conservé pour l'historique et pour solder les montants restants.
+CREATE TABLE IF NOT EXISTS payments(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slot_id INTEGER NOT NULL UNIQUE REFERENCES slots(id) ON DELETE CASCADE,
+    course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+    student_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    teacher_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    amount_cents INTEGER NOT NULL,
+    teacher_amount_cents INTEGER,
+    commission_cents INTEGER,
+    status TEXT NOT NULL DEFAULT 'held' CHECK(status IN ('held', 'released', 'refunded')),
+    release_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS wallet_transactions(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    amount_cents INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('topup', 'hold', 'release', 'refund', 'withdrawal')),
+    description TEXT,
+    stripe_session_id TEXT,
+    payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS withdrawals(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    amount_cents INTEGER NOT NULL,
+    method TEXT NOT NULL,
+    details TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'paid', 'rejected')),
+    admin_note TEXT,
+    wallet_transaction_id INTEGER REFERENCES wallet_transactions(id) ON DELETE SET NULL,
+    stripe_transfer_id TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TEXT
+);
+"""
+
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_slots_course ON slots(course_id);
+CREATE INDEX IF NOT EXISTS idx_slots_reserved ON slots(reserved_by);
+CREATE INDEX IF NOT EXISTS idx_courses_teacher ON courses(teacher_id);
+CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages(sender_id, recipient_id);
+CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(recipient_id, read_at);
+CREATE INDEX IF NOT EXISTS idx_signals_lookup ON signals(course_id, recipient_id, id);
+CREATE INDEX IF NOT EXISTS idx_whiteboard_slot ON whiteboard_strokes(slot_id, id);
+CREATE INDEX IF NOT EXISTS idx_orders_student ON orders(student_id);
+CREATE INDEX IF NOT EXISTS idx_orders_teacher ON orders(teacher_id);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
+CREATE INDEX IF NOT EXISTS idx_order_items_slot ON order_items(slot_id);
+"""
+
+
+def migrate_legacy_schema(db):
+    """Migrations héritées des versions précédentes (bases existantes)."""
+    add_column(db, "users", "bio", "TEXT")
+    add_column(db, "users", "photo", "TEXT")
+    add_column(db, "users", "approved", "INTEGER NOT NULL DEFAULT 1")
+    add_column(db, "users", "education_level", "TEXT")
+    add_column(db, "users", "wallet_cents", "INTEGER NOT NULL DEFAULT 0")
+    add_column(db, "users", "stripe_account_id", "TEXT")
+    add_column(db, "payments", "teacher_amount_cents", "INTEGER")
+    add_column(db, "payments", "commission_cents", "INTEGER")
+    add_column(db, "messages", "attachment_filename", "TEXT")
+    add_column(db, "messages", "attachment_original_name", "TEXT")
+    add_column(db, "messages", "attachment_type", "TEXT")
+    add_column(db, "courses", "price_cents", "INTEGER NOT NULL DEFAULT 0")
+    add_column(db, "courses", "mode", "TEXT NOT NULL DEFAULT 'en_ligne'")
+    add_column(db, "courses", "city", "TEXT")
+    add_column(db, "slots", "reserved_by", "INTEGER REFERENCES users(id) ON DELETE SET NULL")
+    add_column(db, "slots", "student_notes", "TEXT")
+    add_column(db, "slots", "slot_mode", "TEXT")
+
+    # Ancienne colonne slots.reserved_by sans ON DELETE : on reconstruit la
+    # table sans la renommer d'abord (un RENAME réécrirait les FK enfants).
+    row = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'slots'").fetchone()
+    if row and "reserved_by INTEGER REFERENCES users(id) ON DELETE SET NULL" not in row[0]:
         db.executescript(
             """
             CREATE TABLE slots_new(
@@ -504,56 +769,27 @@ def init_db():
                 student_notes TEXT,
                 slot_mode TEXT
             );
-            INSERT INTO slots_new(
-                id, course_id, slot_date, slot_time, duration_minutes, reserved_by, student_notes, slot_mode
-            )
-            SELECT id, course_id, slot_date, slot_time, duration_minutes, reserved_by, student_notes, slot_mode
-            FROM slots;
+            INSERT INTO slots_new(id, course_id, slot_date, slot_time, duration_minutes, reserved_by, student_notes, slot_mode)
+            SELECT id, course_id, slot_date, slot_time, duration_minutes, reserved_by, student_notes, slot_mode FROM slots;
             DROP TABLE slots;
             ALTER TABLE slots_new RENAME TO slots;
             """
         )
 
-    course_columns_full = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
-    if "mode" not in course_columns_full:
-        db.execute("ALTER TABLE courses ADD COLUMN mode TEXT NOT NULL DEFAULT 'en_ligne'")
-    if "city" not in course_columns_full:
-        db.execute("ALTER TABLE courses ADD COLUMN city TEXT")
-
-    # Anciennes bases : la réservation se faisait au niveau du cours entier.
-    # On la reporte sur chacun de ses créneaux, puis on abandonne les colonnes
-    # devenues inutiles sur la table courses.
-    course_columns = [row[1] for row in db.execute("PRAGMA table_info(courses)").fetchall()]
-    if "reserved_by" in course_columns:
-        old_courses = db.execute(
-            "SELECT id, reserved_by, student_notes FROM courses WHERE reserved_by IS NOT NULL"
-        ).fetchall()
-        for c in old_courses:
+    # Très anciennes bases : réservation au niveau du cours entier.
+    course_cols = table_columns(db, "courses")
+    if "reserved_by" in course_cols:
+        for c in db.execute("SELECT id, reserved_by, student_notes FROM courses WHERE reserved_by IS NOT NULL").fetchall():
             db.execute(
                 "UPDATE slots SET reserved_by = ?, student_notes = ? WHERE course_id = ? AND reserved_by IS NULL",
                 (c[1], c[2], c[0]),
             )
         db.execute("ALTER TABLE courses DROP COLUMN reserved_by")
-    if "student_notes" in course_columns:
+    if "student_notes" in table_columns(db, "courses"):
         db.execute("ALTER TABLE courses DROP COLUMN student_notes")
 
-    # Anciennes bases : la table wallet_transactions existe déjà avec un CHECK
-    # qui n'autorise pas encore le type 'withdrawal' (retrait). SQLite ne sait
-    # pas modifier un CHECK en place, on reconstruit donc la table.
-    # Important : la table `withdrawals` (créée juste au-dessus dans ce même
-    # init_db) a une clé étrangère vers wallet_transactions(id). On NE
-    # renomme donc PAS wallet_transactions en premier : depuis SQLite 3.25,
-    # `ALTER TABLE ... RENAME` réécrit automatiquement les FK des tables qui
-    # la référencent, ce qui casserait cette relation une fois l'ancienne
-    # table supprimée. On crée la nouvelle table sous un autre nom, on
-    # supprime l'ancienne "wallet_transactions" (le DROP ne déclenche pas
-    # cette réécriture, contrairement au RENAME), puis on renomme la
-    # nouvelle table vers "wallet_transactions" : withdrawals, qui référence
-    # déjà ce nom, reste valide.
-    wt_schema_row = db.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wallet_transactions'"
-    ).fetchone()
-    if wt_schema_row and "withdrawal" not in wt_schema_row[0]:
+    row = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wallet_transactions'").fetchone()
+    if row and "withdrawal" not in row[0]:
         db.executescript(
             """
             CREATE TABLE wallet_transactions_new(
@@ -566,31 +802,15 @@ def init_db():
                 payment_id INTEGER REFERENCES payments(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
-            INSERT INTO wallet_transactions_new(
-                id, user_id, amount_cents, kind, description, stripe_session_id, payment_id, created_at
-            )
-            SELECT id, user_id, amount_cents, kind, description, stripe_session_id, payment_id, created_at
-            FROM wallet_transactions;
+            INSERT INTO wallet_transactions_new(id, user_id, amount_cents, kind, description, stripe_session_id, payment_id, created_at)
+            SELECT id, user_id, amount_cents, kind, description, stripe_session_id, payment_id, created_at FROM wallet_transactions;
             DROP TABLE wallet_transactions;
             ALTER TABLE wallet_transactions_new RENAME TO wallet_transactions;
             """
         )
 
-    # RÉPARATION D'UN ÉTAT DÉJÀ CASSÉ EN PRODUCTION : une version précédente
-    # de cette migration renommait wallet_transactions AVANT de recréer la
-    # table (RENAME ... TO wallet_transactions_old), ce qui a fait pointer la
-    # FK de `withdrawals.wallet_transaction_id` vers "wallet_transactions_old"
-    # (réécriture automatique de SQLite lors d'un RENAME). Cette table a
-    # ensuite été supprimée, laissant une FK vers une table inexistante — ce
-    # qui provoque "no such table: main.wallet_transactions_old" dès qu'on
-    # supprime un utilisateur ayant une demande de retrait. On détecte ce cas
-    # précis et on reconstruit `withdrawals` avec la FK correcte, en gardant
-    # toutes les données (les id référencés dans wallet_transaction_id restent
-    # valides : ils ont été copiés tels quels vers la nouvelle table).
-    withdrawals_schema_row = db.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'withdrawals'"
-    ).fetchone()
-    if withdrawals_schema_row and "wallet_transactions_old" in withdrawals_schema_row[0]:
+    row = db.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'withdrawals'").fetchone()
+    if row and "wallet_transactions_old" in row[0]:
         db.executescript(
             """
             CREATE TABLE withdrawals_new(
@@ -606,153 +826,440 @@ def init_db():
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 resolved_at TEXT
             );
-            INSERT INTO withdrawals_new(
-                id, user_id, amount_cents, method, details, status, admin_note, wallet_transaction_id, stripe_transfer_id, created_at, resolved_at
-            )
-            SELECT id, user_id, amount_cents, method, details, status, admin_note, wallet_transaction_id, NULL, created_at, resolved_at
-            FROM withdrawals;
+            INSERT INTO withdrawals_new(id, user_id, amount_cents, method, details, status, admin_note, wallet_transaction_id, stripe_transfer_id, created_at, resolved_at)
+            SELECT id, user_id, amount_cents, method, details, status, admin_note, wallet_transaction_id, NULL, created_at, resolved_at FROM withdrawals;
             DROP TABLE withdrawals;
             ALTER TABLE withdrawals_new RENAME TO withdrawals;
             """
         )
+    add_column(db, "withdrawals", "stripe_transfer_id", "TEXT")
 
-    withdrawal_columns = [row[1] for row in db.execute("PRAGMA table_info(withdrawals)").fetchall()]
-    if "stripe_transfer_id" not in withdrawal_columns:
-        db.execute("ALTER TABLE withdrawals ADD COLUMN stripe_transfer_id TEXT")
+
+def migrate_schema(db):
+    """Colonnes ajoutées par cette version."""
+    for column, ddl in [
+        ("teacher_status", "TEXT"),
+        ("siret", "TEXT"),
+        ("stripe_charges_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("stripe_payouts_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("stripe_details_submitted", "INTEGER NOT NULL DEFAULT 0"),
+        ("cgu_accepted_at", "TEXT"),
+        ("cgu_version", "TEXT"),
+        ("created_at", "TEXT"),
+        ("last_login_at", "TEXT"),
+        ("must_change_password", "INTEGER NOT NULL DEFAULT 0"),
+        ("deleted_at", "TEXT"),
+        ("legacy_settled_at", "TEXT"),
+    ]:
+        add_column(db, "users", column, ddl)
+    db.execute("UPDATE users SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL")
+    db.execute("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE last_login_at IS NULL")
+
+    add_column(db, "slots", "reservation_status", "TEXT")
+    add_column(db, "slots", "pending_until", "TEXT")
+    add_column(db, "slots", "reserved_at", "TEXT")
+    db.execute(
+        "UPDATE slots SET reservation_status = 'confirmed' WHERE reserved_by IS NOT NULL AND reservation_status IS NULL"
+    )
+
+
+def init_db():
+    db = connect_db()
+    db.execute("PRAGMA journal_mode = WAL")
+    db.executescript(SCHEMA)
+    migrate_legacy_schema(db)
+    migrate_schema(db)
+    db.executescript(INDEXES)
+
+    if not db.execute("SELECT 1 FROM settings WHERE key = 'registration_mode'").fetchone():
+        db.execute("INSERT INTO settings(key, value) VALUES ('registration_mode', 'tous')")
 
     os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
+    os.makedirs(MESSAGE_ATTACHMENTS_DIR, exist_ok=True)
 
-    # Le compte admin est toujours garanti d'exister, avec des identifiants fixes.
-    admin_row = db.execute("SELECT id FROM users WHERE email = ?", (ADMIN_EMAIL,)).fetchone()
-    if not admin_row:
+    if not db.execute("SELECT 1 FROM users WHERE email = ?", (ADMIN_EMAIL,)).fetchone():
+        admin_password = os.environ.get("ADMIN_PASSWORD")
+        if not admin_password:
+            admin_password = secrets.token_urlsafe(18)
+            print(
+                "=" * 70 + "\nCompte administrateur créé : " + ADMIN_EMAIL + "\n"
+                f"Mot de passe généré (affiché une seule fois) : {admin_password}\n"
+                "Changez-le dès la première connexion, ou définissez ADMIN_PASSWORD.\n" + "=" * 70,
+                flush=True,
+            )
         db.execute(
-            "INSERT INTO users(name, email, password_hash, role) VALUES (?, ?, ?, ?)",
-            ("Administrateur", ADMIN_EMAIL, generate_password_hash(ADMIN_PASSWORD), "admin"),
+            "INSERT INTO users(name, email, password_hash, role, created_at, last_login_at) "
+            "VALUES (?, ?, ?, 'admin', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            ("Administrateur", ADMIN_EMAIL, generate_password_hash(admin_password)),
         )
 
-    already_seeded = db.execute("SELECT COUNT(*) FROM users WHERE role != 'admin'").fetchone()[0] > 0
-    if not already_seeded:
-        seed(db)
+    if DEMO_MODE:
+        if db.execute("SELECT COUNT(*) FROM users WHERE role != 'admin'").fetchone()[0] == 0:
+            seed_demo_data(db)
+    else:
+        lock_demo_accounts(db)
 
     db.commit()
     db.close()
 
 
-def seed(db):
-    demo_users = [
-        (
-            "Camille Dubois",
-            "camille@coursconnect.fr",
-            "prof123",
-            "prof",
-            "Professeure de mathématiques et de physique-chimie depuis 8 ans, "
-            "spécialisée dans la préparation du brevet et les révisions ciblées.",
-        ),
-        (
-            "Karim Haddad",
-            "karim@coursconnect.fr",
-            "prof123",
-            "prof",
-            "Enseignant de français et de SES, j'aide les lycéens à structurer "
-            "leur méthodologie pour la dissertation et les épreuves finales.",
-        ),
-        ("Léa Marchand", "lea@coursconnect.fr", "etu123", "etudiant", None),
+def lock_demo_accounts(db):
+    """Les comptes de démonstration créés par les anciennes versions avaient
+    des mots de passe publiés dans le README : s'ils n'ont jamais été
+    changés, on les rend inutilisables (mot de passe aléatoire)."""
+    for email, old_password in DEMO_ACCOUNTS.items():
+        row = db.execute("SELECT id, password_hash FROM users WHERE email = ?", (email,)).fetchone()
+        if row and check_password_hash(row["password_hash"], old_password):
+            db.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ?",
+                (generate_password_hash(secrets.token_urlsafe(32)), row["id"]),
+            )
+            print(f"Compte de démonstration {email} désactivé (mot de passe public).", flush=True)
+
+
+def seed_demo_data(db):
+    start = date.today() + timedelta(days=21)
+    profs = [
+        ("Camille Dubois", "camille@coursconnect.fr", "prof",
+         "Professeure de mathématiques et de physique-chimie, je prépare au brevet et aux révisions de fin d'année."),
+        ("Karim Haddad", "karim@coursconnect.fr", "prof",
+         "J'aide les lycéens à structurer leur méthode pour la dissertation et les épreuves de SES."),
+        ("Léa Marchand", "lea@coursconnect.fr", "etudiant", None),
     ]
     ids = {}
-    for name, email, password, role, bio in demo_users:
+    for name, email, role, bio in profs:
         cur = db.execute(
-            "INSERT INTO users(name, email, password_hash, role, bio) VALUES (?, ?, ?, ?, ?)",
-            (name, email, generate_password_hash(password), role, bio),
+            "INSERT INTO users(name, email, password_hash, role, bio, teacher_status, cgu_accepted_at, cgu_version, created_at, last_login_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (name, email, generate_password_hash(DEMO_PASSWORD), role, bio,
+             "particulier" if role == "prof" else None, TERMS_VERSION),
         )
         ids[email] = cur.lastrowid
-
-    demo_courses = [
-        (
-            "Préparer le brevet de mathématiques",
-            "Mathématiques",
-            "3e",
-            "Révisions ciblées sur le programme de troisième, avec exercices type brevet.",
-            ids["camille@coursconnect.fr"],
-            [("2026-09-08", "17:00", 60), ("2026-09-15", "17:00", 60)],
-        ),
-        (
-            "Mécanique et énergie",
-            "Physique-Chimie",
-            "1re",
-            "Les bases de la mécanique et des transferts d'énergie au programme de première.",
-            ids["camille@coursconnect.fr"],
-            [("2026-09-10", "18:00", 90)],
-        ),
-        (
-            "Dissertation et analyse de texte",
-            "Français",
-            "2nde",
-            "Méthodologie de la dissertation et de l'analyse littéraire pour la seconde.",
-            ids["karim@coursconnect.fr"],
-            [("2026-09-09", "16:30", 60), ("2026-09-16", "16:30", 60)],
-        ),
-        (
-            "Révisions SES — Terminale",
-            "SES",
-            "Terminale",
-            "Synthèse des grands thèmes de SES en vue des épreuves de terminale.",
-            ids["karim@coursconnect.fr"],
-            [("2026-09-12", "14:00", 120)],
-        ),
+    courses = [
+        ("Préparer le brevet de mathématiques", "Mathématiques", "3e",
+         "Révisions ciblées sur le programme de troisième, avec des exercices type brevet.",
+         ids["camille@coursconnect.fr"], [(0, "17:00", 60), (7, "17:00", 60)]),
+        ("Dissertation et analyse de texte", "Français", "2nde",
+         "Méthode de la dissertation et de l'analyse littéraire pour la seconde.",
+         ids["karim@coursconnect.fr"], [(1, "16:30", 60), (8, "16:30", 60)]),
     ]
-    for title, subject, level, description, teacher_id, slots in demo_courses:
+    for title, subject, level, desc, teacher_id, slots in courses:
         cur = db.execute(
-            "INSERT INTO courses(title, subject, level, description, teacher_id) VALUES (?, ?, ?, ?, ?)",
-            (title, subject, level, description, teacher_id),
+            "INSERT INTO courses(title, subject, level, description, teacher_id, price_cents) VALUES (?, ?, ?, ?, ?, 0)",
+            (title, subject, level, desc, teacher_id),
         )
-        course_id = cur.lastrowid
-        reserve_first_slot = title.startswith("Préparer le brevet") or title.startswith("Révisions SES")
-        for i, (slot_date, slot_time, duration) in enumerate(slots):
-            slot_cur = db.execute(
+        for offset, slot_time, duration in slots:
+            db.execute(
                 "INSERT INTO slots(course_id, slot_date, slot_time, duration_minutes) VALUES (?, ?, ?, ?)",
-                (course_id, slot_date, slot_time, duration),
+                (cur.lastrowid, (start + timedelta(days=offset)).isoformat(), slot_time, duration),
             )
-            # Seul le tout premier créneau de ces cours est déjà réservé, pour
-            # illustrer qu'un même cours peut avoir des créneaux libres et
-            # d'autres pris par un élève.
-            if reserve_first_slot and i == 0:
-                db.execute(
-                    "UPDATE slots SET reserved_by = ? WHERE id = ?",
-                    (ids["lea@coursconnect.fr"], slot_cur.lastrowid),
-                )
-                db.execute(
-                    "INSERT OR IGNORE INTO contacts(student_id, teacher_id, course_id) VALUES (?, ?, ?)",
-                    (ids["lea@coursconnect.fr"], teacher_id, course_id),
-                )
+    print(f"Données de démonstration créées (mot de passe des comptes : {DEMO_PASSWORD}).", flush=True)
 
-    # Un petit échange de démonstration pour illustrer la messagerie.
+
+# ---------------------------------------------------------------------------
+# Journal d'audit
+# ---------------------------------------------------------------------------
+def audit(db, action, target=None, details=None, actor_id=None):
+    ip = None
+    if has_request_context():
+        ip = client_ip()
+        if actor_id is None:
+            user = g.get("current_user")
+            actor_id = user["id"] if user else None
     db.execute(
-        "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
-        (ids["lea@coursconnect.fr"], ids["camille@coursconnect.fr"],
-         "Bonjour, avant notre premier cours, pourriez-vous me confirmer si nous verrons les fractions ?"),
-    )
-    db.execute(
-        "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
-        (ids["camille@coursconnect.fr"], ids["lea@coursconnect.fr"],
-         "Bonjour Léa, oui tout à fait, on commencera justement par les fractions."),
+        "INSERT INTO audit_log(actor_id, action, target, details, ip) VALUES (?, ?, ?, ?, ?)",
+        (actor_id, action, target, (details or "")[:1000] or None, ip),
     )
 
 
 # ---------------------------------------------------------------------------
 # Authentification
 # ---------------------------------------------------------------------------
+_DUMMY_HASH = generate_password_hash(secrets.token_urlsafe(16))
+
+
+def auth_fingerprint(password_hash):
+    """Empreinte du mot de passe stockée en session : un changement de mot de
+    passe invalide immédiatement toutes les autres sessions ouvertes."""
+    return hmac.new(app.secret_key.encode(), password_hash.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+SESSION_MAX_AGE_SECONDS = 12 * 3600
+
+
+def login_user(user):
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user["id"]
+    session["auth_fp"] = auth_fingerprint(user["password_hash"])
+    session["login_at"] = int(time_mod.time())
+    db = get_db()
+    db.execute("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?", (user["id"],))
+    db.commit()
+
+
+def current_user():
+    if "current_user" in g:
+        return g.current_user
+    user = None
+    user_id = session.get("user_id")
+    if user_id:
+        row = get_db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        login_age = time_mod.time() - float(session.get("login_at") or 0)
+        if (
+            row
+            and not row["deleted_at"]
+            and 0 <= login_age <= SESSION_MAX_AGE_SECONDS  # durée absolue, même si l'utilisateur reste actif
+            and hmac.compare_digest(str(session.get("auth_fp", "")), auth_fingerprint(row["password_hash"]))
+        ):
+            user = row
+        else:
+            session.clear()
+    g.current_user = user
+    return user
+
+
+def refresh_current_user():
+    g.pop("current_user", None)
+    return current_user()
+
+
+ROLE_MESSAGES = {
+    ("prof",): "Connectez-vous avec un compte professeur pour accéder à cette page.",
+    ("etudiant",): "Connectez-vous avec un compte élève pour accéder à cette page.",
+    ("admin",): "Cette page est réservée à l'administration.",
+}
+
+
+def login_required(role=None):
+    allowed = None if role is None else ((role,) if isinstance(role, str) else tuple(role))
+
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            user = current_user()
+            if not user or (allowed and user["role"] not in allowed):
+                flash(ROLE_MESSAGES.get(allowed, "Connectez-vous pour accéder à cette page."), "error")
+                return redirect(url_for("connexion"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
+
+
+PUBLIC_ENDPOINTS = {
+    "static", "parametres", "deconnexion", "mentions_legales", "cgu", "cgv",
+    "confidentialite", "presentation", "index",
+}
+
+
+@app.before_request
+def enforce_password_change():
+    if request.endpoint in PUBLIC_ENDPOINTS or request.endpoint == "stripe_webhook":
+        return None
+    user = current_user()
+    if user and user["must_change_password"]:
+        flash("Choisissez un nouveau mot de passe pour continuer.", "error")
+        return redirect(url_for("parametres"))
+    return None
+
+
+def dashboard_url_for(role):
+    if role == "admin":
+        return url_for("admin_dashboard")
+    if role == "prof":
+        return url_for("prof_dashboard")
+    return url_for("etudiant")
+
+
+# ---------------------------------------------------------------------------
+# Filtres et variables de gabarits
+# ---------------------------------------------------------------------------
+MOIS_FR = ["", "janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
+           "septembre", "octobre", "novembre", "décembre"]
+MOIS_FR_CAP = [m.capitalize() for m in MOIS_FR]
+JOURS_FR = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
+JOURS_COURTS = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+
+
+@app.template_filter("euros")
+def euros(cents):
+    cents = int(cents or 0)
+    sign = "-" if cents < 0 else ""
+    cents = abs(cents)
+    whole, rest = divmod(cents, 100)
+    whole_str = f"{whole:,}".replace(",", " ")
+    return f"{sign}{whole_str},{rest:02d} €"
+
+
+@app.template_filter("duree")
+def duree(minutes):
+    h, m = divmod(int(minutes or 0), 60)
+    if h and m:
+        return f"{h} h {m:02d}"
+    if h:
+        return f"{h} h"
+    return f"{m} min"
+
+
+@app.template_filter("date_fr")
+def date_fr(value):
+    """Horodatage UTC de la base -> date et heure de Paris lisibles."""
+    dt = parse_db_utc(value)
+    if not dt:
+        return value or ""
+    local = dt.replace(tzinfo=timezone.utc).astimezone(PARIS)
+    return local.strftime("%d/%m/%Y à %H:%M")
+
+
+@app.template_filter("jour_fr")
+def jour_fr(iso_date):
+    try:
+        d = date.fromisoformat(str(iso_date))
+    except ValueError:
+        return iso_date
+    return f"{JOURS_FR[d.weekday()]} {d.day} {MOIS_FR[d.month]} {d.year}"
+
+
+@app.template_filter("creneau_fr")
+def creneau_fr(slot):
+    return f"{jour_fr(slot['slot_date'])} à {str(slot['slot_time'])[:5].replace(':', ' h ')}"
+
+
+@app.template_global("seance_terminee")
+def seance_terminee(slot):
+    return safe_slot_end(slot) <= now_local()
+
+
+@app.template_global("seance_commencee")
+def seance_commencee(slot):
+    return safe_slot_start(slot) <= now_local()
+
+
+@app.context_processor
+def inject_globals():
+    user = current_user()
+    ctx = {
+        "current_user": user,
+        "LEGAL": LEGAL,
+        "SITE_NAME": SITE_NAME,
+        "TEACHER_STATUSES": TEACHER_STATUSES,
+        "PRO_STATUSES": PRO_STATUSES,
+        "PLATFORM_FEE_PERCENT": PLATFORM_FEE_PERCENT,
+        "TERMS_DATE": TERMS_DATE,
+        "MODE_LABELS": MODE_LABELS,
+        "unread_messages_total": 0,
+        "open_reports_total": 0,
+        "legal_missing": [],
+    }
+    if user:
+        db = get_db()
+        ctx["unread_messages_total"] = db.execute(
+            "SELECT COUNT(*) FROM messages WHERE recipient_id = ? AND read_at IS NULL", (user["id"],)
+        ).fetchone()[0]
+        if user["role"] == "admin":
+            ctx["open_reports_total"] = db.execute("SELECT COUNT(*) FROM reports WHERE status = 'open'").fetchone()[0]
+            ctx["legal_missing"] = LEGAL_MISSING
+    return ctx
+
+
+# ---------------------------------------------------------------------------
+# Téléversements (photos de profil, pièces jointes)
+# ---------------------------------------------------------------------------
+class UploadError(ValueError):
+    pass
+
+
+def _read_upload(file_storage):
+    data = file_storage.stream.read(MAX_UPLOAD_BYTES + 1)
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise UploadError("Le fichier dépasse la taille maximale autorisée (8 Mo).")
+    if not data:
+        raise UploadError("Le fichier est vide.")
+    return data
+
+
+def _open_image(data, allowed_formats):
+    try:
+        img = Image.open(BytesIO(data))
+        if img.format not in allowed_formats:
+            raise UploadError("Format d'image non pris en charge.")
+        if img.width * img.height > MAX_IMAGE_PIXELS_ACCEPTED:
+            raise UploadError("Image trop grande (25 mégapixels maximum).")
+        img.load()
+        return img
+    except UploadError:
+        raise
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError, SyntaxError, ValueError):
+        raise UploadError("Ce fichier n'est pas une image valide.") from None
+
+
+def save_profile_photo(file_storage):
+    """Ré-encode la photo en JPEG 512 px max, sans métadonnées. Renvoie le nom de fichier."""
+    img = _open_image(_read_upload(file_storage), PROFILE_IMAGE_FORMATS)
+    img = ImageOps.exif_transpose(img)
+    if img.mode in ("RGBA", "LA", "P"):
+        img = img.convert("RGBA")
+        background = Image.new("RGB", img.size, (255, 255, 255))
+        background.paste(img, mask=img.split()[-1])
+        img = background
+    else:
+        img = img.convert("RGB")
+    img.thumbnail((512, 512))
+    filename = f"{secrets.token_hex(16)}.jpg"
+    os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
+    img.save(os.path.join(PROFILE_PHOTOS_DIR, filename), "JPEG", quality=85, optimize=True)
+    return filename
+
+
+def save_message_attachment(file_storage):
+    """Images (ré-encodées, sans métadonnées) ou PDF. Renvoie (nom stocké, nom d'origine, type)."""
+    original = clean(file_storage.filename or "fichier", 120)
+    data = _read_upload(file_storage)
+    os.makedirs(MESSAGE_ATTACHMENTS_DIR, exist_ok=True)
+    if data[:5] == b"%PDF-":
+        stored = f"{secrets.token_hex(16)}.pdf"
+        with open(os.path.join(MESSAGE_ATTACHMENTS_DIR, stored), "wb") as fh:
+            fh.write(data)
+        return stored, original, "pdf"
+    img = _open_image(data, set(ATTACHMENT_IMAGE_FORMATS))
+    ext = ATTACHMENT_IMAGE_FORMATS[img.format]
+    img = ImageOps.exif_transpose(img)
+    img.thumbnail((2000, 2000))
+    stored = f"{secrets.token_hex(16)}.{ext}"
+    path = os.path.join(MESSAGE_ATTACHMENTS_DIR, stored)
+    if ext == "jpg":
+        img.convert("RGB").save(path, "JPEG", quality=88)
+    elif ext == "webp":
+        img.save(path, "WEBP", quality=88)
+    else:
+        if img.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+            img = img.convert("RGBA")
+        img.save(path, "PNG", optimize=True)
+    return stored, original, "image"
+
+
+def delete_file_quietly(directory, filename):
+    if not filename or "/" in filename or "\\" in filename or filename.startswith("."):
+        return
+    try:
+        os.remove(os.path.join(directory, filename))
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Requêtes communes
+# ---------------------------------------------------------------------------
 def get_slots_map(db, course_ids):
-    """Retourne {course_id: [slot, ...]} triés par date/heure pour une liste d'ids de
-    cours. Chaque créneau porte son propre statut de réservation (reserved_by,
-    student_name, student_notes), puisque la réservation se fait créneau par créneau."""
     if not course_ids:
         return {}
     placeholders = ",".join("?" for _ in course_ids)
     rows = db.execute(
         f"""
         SELECT sl.*, u.name AS student_name
-        FROM slots sl
-        LEFT JOIN users u ON u.id = sl.reserved_by
+        FROM slots sl LEFT JOIN users u ON u.id = sl.reserved_by
         WHERE sl.course_id IN ({placeholders})
         ORDER BY sl.slot_date, sl.slot_time
         """,
@@ -765,458 +1272,657 @@ def get_slots_map(db, course_ids):
 
 
 def get_teacher_ratings_map(db, teacher_ids):
-    """Retourne {teacher_id: {"avg": moyenne, "count": nb_notes}} pour une liste
-    d'ids de profs. Ne renvoie jamais le détail des notes individuelles."""
-    teacher_ids = [tid for tid in {t for t in teacher_ids if t is not None}]
+    teacher_ids = sorted({t for t in teacher_ids if t is not None})
     if not teacher_ids:
         return {}
     placeholders = ",".join("?" for _ in teacher_ids)
     rows = db.execute(
-        f"""
-        SELECT teacher_id, AVG(rating) AS avg_rating, COUNT(*) AS nb_ratings
-        FROM ratings
-        WHERE teacher_id IN ({placeholders})
-        GROUP BY teacher_id
-        """,
+        f"SELECT teacher_id, AVG(rating) AS avg_rating, COUNT(*) AS nb FROM ratings "
+        f"WHERE teacher_id IN ({placeholders}) GROUP BY teacher_id",
         teacher_ids,
     ).fetchall()
-    return {r["teacher_id"]: {"avg": r["avg_rating"], "count": r["nb_ratings"]} for r in rows}
+    return {r["teacher_id"]: {"avg": r["avg_rating"], "count": r["nb"]} for r in rows}
 
 
-# ---------------------------------------------------------------------------
-# Portefeuille & séquestre des paiements
-# ---------------------------------------------------------------------------
-
-
-def credit_wallet(db, user_id, amount_cents, kind, description=None, stripe_session_id=None, payment_id=None):
-    """Crédite (amount_cents > 0) ou débite (amount_cents < 0) le portefeuille
-    d'un utilisateur et journalise le mouvement. Ne fait pas de commit.
-    Renvoie l'id du mouvement créé dans wallet_transactions."""
-    db.execute("UPDATE users SET wallet_cents = wallet_cents + ? WHERE id = ?", (amount_cents, user_id))
-    cur = db.execute(
-        """
-        INSERT INTO wallet_transactions(user_id, amount_cents, kind, description, stripe_session_id, payment_id)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (user_id, amount_cents, kind, description, stripe_session_id, payment_id),
-    )
-    return cur.lastrowid
-
-
-WITHDRAWAL_METHODS = {
-    "virement": "Virement bancaire (IBAN)",
-    "especes": "Retrait en espèces (à convenir avec l'administration)",
-    "stripe": "Versement bancaire via Stripe Connect",
-}
-
-
-class WithdrawalError(Exception):
-    pass
-
-
-def get_or_create_stripe_account(db, user):
-    """Crée un compte Connect Express pour recevoir des versements."""
-    if not STRIPE_SECRET_KEY:
-        raise WithdrawalError("Stripe n'est pas configuré sur ce serveur.")
-    if user["stripe_account_id"]:
-        return user["stripe_account_id"]
-    try:
-        account = stripe.Account.create(
-            type="express",
-            country="FR",
-            email=user["email"],
-            capabilities={"transfers": {"requested": True}},
-            metadata={"coursconnect_user_id": str(user["id"])},
-        )
-    except Exception as exc:
-        raise WithdrawalError(f"Impossible de créer le compte Stripe Connect : {exc}") from exc
-    db.execute("UPDATE users SET stripe_account_id = ? WHERE id = ?", (account.id, user["id"]))
-    return account.id
-
-
-def create_stripe_onboarding_link(db, user):
-    account_id = get_or_create_stripe_account(db, user)
-    try:
-        return stripe.AccountLink.create(
-            account=account_id,
-            type="account_onboarding",
-            refresh_url=url_for("portefeuille_connect_onboarding", _external=True),
-            return_url=url_for("portefeuille_connect_return", _external=True),
-        )
-    except Exception as exc:
-        raise WithdrawalError(f"Impossible de démarrer la vérification Stripe : {exc}") from exc
-
-
-def request_withdrawal(db, user, amount_cents, method, details):
-    """Débite immédiatement le portefeuille de l'utilisateur et enregistre une
-    demande de retrait en attente de traitement par un administrateur.
-    Lève WithdrawalError si la demande est invalide. Ne fait pas de commit."""
-    if amount_cents <= 0:
-        raise WithdrawalError("Montant de retrait invalide.")
-    if amount_cents > (user["wallet_cents"] or 0):
-        raise WithdrawalError("Solde insuffisant pour ce retrait.")
-    if method not in WITHDRAWAL_METHODS:
-        raise WithdrawalError("Moyen de retrait invalide.")
-    if method != "stripe" and (not details or not details.strip()):
-        raise WithdrawalError("Merci de préciser vos coordonnées pour le versement (IBAN, etc.).")
-
-    wt_id = credit_wallet(
-        db, user["id"], -amount_cents, "withdrawal",
-        description=f"Demande de retrait ({WITHDRAWAL_METHODS[method]})",
-    )
-    cur = db.execute(
-        """
-        INSERT INTO withdrawals(user_id, amount_cents, method, details, wallet_transaction_id)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (user["id"], amount_cents, method, (details or "").strip(), wt_id),
-    )
-    return cur.lastrowid
-
-
-def slot_start_datetime(slot):
-    """Renvoie la date/heure de début d'un créneau (datetime)."""
-    return datetime.strptime(f"{slot['slot_date']} {slot['slot_time']}", "%Y-%m-%d %H:%M")
-
-
-def slot_end_datetime(slot):
-    """Renvoie la date/heure de fin d'un créneau (datetime), utilisée pour
-    calculer le moment où le séquestre du paiement devient libérable."""
-    return slot_start_datetime(slot) + timedelta(minutes=int(slot["duration_minutes"]))
-
-
-def slot_is_cancellable(slot):
-    """Un créneau ne peut plus être annulé (ni par le professeur, ni par
-    l'élève) dans les CANCELLATION_MIN_DELAY (12h) précédant son début."""
-    return datetime.now() <= slot_start_datetime(slot) - CANCELLATION_MIN_DELAY
-
-
-def create_payment_hold(db, slot, course, student_id):
-    """Débite le portefeuille de l'élève du prix du cours et met la somme en
-    séquestre (statut 'held') jusqu'à confirmation, remboursement, ou
-    libération automatique 24h après la fin du cours."""
-    amount = course["price_cents"] or 0
-    if amount <= 0:
-        return None
-    release_at = slot_end_datetime(slot) + PAYMENT_HOLD_DELAY
-    credit_wallet(
-        db, student_id, -amount, "hold",
-        description=f"Paiement séquestré pour « {course['title']} »",
-    )
-    cur = db.execute(
-        """
-        INSERT INTO payments(slot_id, course_id, student_id, teacher_id, amount_cents, status, release_at)
-        VALUES (?, ?, ?, ?, ?, 'held', ?)
-        """,
-        (slot["id"], course["id"], student_id, course["teacher_id"], amount, release_at.strftime("%Y-%m-%d %H:%M:%S")),
-    )
-    return cur.lastrowid
-
-
-def admin_id_from_db(db):
-    """Comme get_admin_id(), mais prend explicitement une connexion en
-    paramètre : nécessaire car release_payment() est aussi appelée depuis le
-    thread d'arrière-plan (run_auto_release_once), en dehors de tout contexte
-    de requête Flask, où get_db()/g n'est pas disponible."""
-    row = db.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
+def get_admin_id(db=None):
+    row = (db or get_db()).execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").fetchone()
     return row["id"] if row else None
 
 
-def release_payment(db, payment, reason="auto"):
-    """Verse le paiement séquestré : une commission (ADMIN_COMMISSION_RATE)
-    est prélevée pour la plateforme et versée au compte admin, le reste est
-    crédité au professeur. Cette commission n'est prélevée que sur les
-    transactions qui se sont déroulées correctement (confirmation de l'élève
-    ou libération automatique) — jamais en cas de remboursement."""
-    amount = payment["amount_cents"]
-    commission = round(amount * ADMIN_COMMISSION_RATE)
-    teacher_amount = amount - commission
+def teacher_can_receive_payments(teacher):
+    return bool(STRIPE_SECRET_KEY and teacher["stripe_account_id"] and teacher["stripe_charges_enabled"])
 
-    origin = "Cours confirmé" if reason == "student" else "Versement automatique après 24h"
 
-    admin_id = admin_id_from_db(db)
-    if commission > 0 and admin_id:
-        credit_wallet(
-            db, admin_id, commission, "release",
-            description=f"Commission plateforme ({ADMIN_COMMISSION_RATE * 100:.0f} %) — {origin.lower()} (paiement #{payment['id']})",
-            payment_id=payment["id"],
-        )
+def get_registration_mode():
+    row = get_db().execute("SELECT value FROM settings WHERE key = 'registration_mode'").fetchone()
+    return row["value"] if row else "tous"
 
-    credit_wallet(
-        db, payment["teacher_id"], teacher_amount, "release",
-        description=f"{origin} — versement (commission plateforme déduite)",
-        payment_id=payment["id"],
+
+# ---------------------------------------------------------------------------
+# Paiements : réservations, encaissement Stripe, remboursements
+# ---------------------------------------------------------------------------
+class PaymentError(Exception):
+    pass
+
+
+def next_document_number(db, prefix, teacher_id):
+    """Numéro de facture/reçu ou d'avoir : séquence continue par professeur."""
+    key = f"{prefix}-{teacher_id or 0}"
+    value = db.execute(
+        "INSERT INTO doc_sequences(key, value) VALUES (?, 1) "
+        "ON CONFLICT(key) DO UPDATE SET value = value + 1 RETURNING value",
+        (key,),
+    ).fetchone()[0]
+    return f"{prefix}{(teacher_id or 0):04d}-{value:05d}"
+
+
+def free_slot(db, slot_id, only_if_reserved_by=None, only_if_pending=False):
+    sql = (
+        "UPDATE slots SET reserved_by = NULL, student_notes = NULL, slot_mode = NULL, "
+        "reservation_status = NULL, pending_until = NULL, reserved_at = NULL WHERE id = ?"
     )
-    db.execute(
-        """
-        UPDATE payments
-        SET status = 'released', resolved_at = CURRENT_TIMESTAMP,
-            teacher_amount_cents = ?, commission_cents = ?
-        WHERE id = ?
-        """,
-        (teacher_amount, commission, payment["id"]),
-    )
+    params = [slot_id]
+    if only_if_reserved_by is not None:
+        sql += " AND reserved_by = ?"
+        params.append(only_if_reserved_by)
+    if only_if_pending:
+        sql += " AND reservation_status = 'pending'"
+    return db.execute(sql, params).rowcount
 
 
-def refund_payment(db, payment):
-    """Rembourse l'élève : recrédite son portefeuille interne avec la somme
-    initialement séquestrée."""
-    credit_wallet(
-        db, payment["student_id"], payment["amount_cents"], "refund",
-        description="Remboursement demandé par l'élève",
-        payment_id=payment["id"],
-    )
-    db.execute(
-        "UPDATE payments SET status = 'refunded', resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
-        (payment["id"],),
-    )
+def release_pending_order(db, order_id, status="expired"):
+    """Abandon d'une réservation non payée : libère les créneaux bloqués."""
+    order = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    if not order or order["status"] != "pending":
+        return False
+    if not db.execute("UPDATE orders SET status = ? WHERE id = ? AND status = 'pending'", (status, order_id)).rowcount:
+        return False
+    for item in db.execute("SELECT * FROM order_items WHERE order_id = ? AND status = 'pending'", (order_id,)).fetchall():
+        if item["slot_id"]:
+            free_slot(db, item["slot_id"], only_if_reserved_by=order["student_id"], only_if_pending=True)
+    db.execute("UPDATE order_items SET status = 'canceled' WHERE order_id = ? AND status = 'pending'", (order_id,))
+    return True
 
 
-INVOICE_SELLER_NAME = "CoursConnect"
-INVOICE_SELLER_NOTE = "Plateforme de mise en relation entre professeurs particuliers et élèves."
-
-
-def generate_invoice_pdf(payment, slot, course, student, teacher):
-    """Génère la facture PDF (en mémoire) d'une séance de cours payée.
-    `payment`, `slot`, `course`, `student` et `teacher` sont des sqlite3.Row.
-    Renvoie un buffer BytesIO positionné au début, prêt à être envoyé."""
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(
-        buffer, pagesize=A4,
-        topMargin=22 * mm, bottomMargin=22 * mm, leftMargin=20 * mm, rightMargin=20 * mm,
-        title=f"Facture CoursConnect #{payment['id']}",
-    )
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("InvoiceTitle", parent=styles["Title"], fontSize=20, spaceAfter=2)
-    small_muted = ParagraphStyle("SmallMuted", parent=styles["Normal"], fontSize=9, textColor=colors.grey)
-    normal = styles["Normal"]
-    right = ParagraphStyle("Right", parent=styles["Normal"], alignment=TA_RIGHT)
-
-    elements = []
-    elements.append(Paragraph(INVOICE_SELLER_NAME, title_style))
-    elements.append(Paragraph(INVOICE_SELLER_NOTE, small_muted))
-    elements.append(Spacer(1, 14))
-
-    invoice_number = f"CC-{payment['id']:06d}"
-    issued_at = (payment["resolved_at"] or payment["created_at"] or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    header_data = [
-        [Paragraph(f"<b>Facture n° {invoice_number}</b>", normal), Paragraph(f"Émise le {issued_at}", right)],
-        [Paragraph(f"Professeur : <b>{teacher['name']}</b><br/>{teacher['email']}", normal),
-         Paragraph(f"Élève : <b>{student['name']}</b><br/>{student['email']}", right)],
-    ]
-    header_table = Table(header_data, colWidths=[95 * mm, 75 * mm])
-    header_table.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-    ]))
-    elements.append(header_table)
-    elements.append(Spacer(1, 16))
-
-    duration = duree_lisible(slot["duration_minutes"])
-    mode_label = "En ligne" if slot["slot_mode"] == "en_ligne" else "En présentiel"
-    description = (
-        f"{course['title']}<br/><font size=8 color=grey>{course['subject']} · {course['level']} · "
-        f"séance du {slot['slot_date']} à {slot['slot_time']} ({duration}) · {mode_label}</font>"
-    )
-
-    table_data = [["Prestation", "Montant"], [Paragraph(description, normal), euros(payment["amount_cents"])]]
-    if payment["status"] == "released":
-        table_data.append(["dont commission plateforme", f"− {euros(payment['commission_cents'] or 0)}"])
-        table_data.append([Paragraph("<b>Net versé au professeur</b>", normal), Paragraph(f"<b>{euros(payment['teacher_amount_cents'] or 0)}</b>", normal)])
-    elif payment["status"] == "refunded":
-        table_data.append(["Statut", "Remboursé à l'élève"])
+def recompute_order_status(db, order_id):
+    order = db.execute("SELECT status FROM orders WHERE id = ?", (order_id,)).fetchone()
+    statuses = [r[0] for r in db.execute("SELECT status FROM order_items WHERE order_id = ?", (order_id,)).fetchall()]
+    if not order or not statuses or order["status"] in ("pending", "expired", "canceled"):
+        return
+    if all(s in ("refunded", "canceled") for s in statuses):
+        new = "canceled" if order["status"] == "free" else "refunded"
+    elif any(s in ("refunded", "canceled") for s in statuses):
+        new = "free" if order["status"] == "free" else "partially_refunded"
     else:
-        table_data.append(["Statut", "En séquestre (en attente de règlement)"])
-
-    invoice_table = Table(table_data, colWidths=[120 * mm, 50 * mm])
-    invoice_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2a24")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTSIZE", (0, 0), (-1, 0), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
-        ("TOPPADDING", (0, 0), (-1, 0), 8),
-        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#d8d3c8")),
-        ("FONTSIZE", (0, 1), (-1, -1), 9.5),
-        ("TOPPADDING", (0, 1), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 1), (-1, -1), 7),
-    ]))
-    elements.append(invoice_table)
-    elements.append(Spacer(1, 20))
-
-    elements.append(Paragraph(
-        "Montant total réglé par l'élève à la réservation du créneau, mis en séquestre par "
-        "CoursConnect jusqu'au règlement du professeur (confirmation de l'élève ou versement "
-        "automatique 24h après la séance) ou jusqu'à un éventuel remboursement.",
-        small_muted,
-    ))
-    elements.append(Spacer(1, 6))
-    elements.append(Paragraph(f"Référence paiement interne : #{payment['id']} · Créneau #{slot['id']}", small_muted))
-
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer
+        new = order["status"]
+    db.execute("UPDATE orders SET status = ? WHERE id = ?", (new, order_id))
 
 
-def run_auto_release_once():
-    """Parcourt les paiements toujours en séquestre dont le délai de 24h est
-    dépassé et les verse automatiquement au professeur."""
-    db = sqlite3.connect(DB_PATH)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA foreign_keys = ON")
+def confirm_order(db, order_id, payment_intent_id=None, free=False):
+    """Passe une commande en « payée » (ou gratuite confirmée). Renvoie la
+    liste des lignes à rembourser parce que le créneau a été perdu entre-temps."""
+    order = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    if not order or order["status"] != "pending":
+        return []
+    new_status = "free" if free else "paid"
+    updated = db.execute(
+        "UPDATE orders SET status = ?, paid_at = ?, stripe_payment_intent_id = ? WHERE id = ? AND status = 'pending'",
+        (new_status, utc_now_str(), payment_intent_id, order_id),
+    ).rowcount
+    if not updated:
+        return []
+    if not free:
+        db.execute("UPDATE orders SET invoice_number = ? WHERE id = ?",
+                   (next_document_number(db, "F", order["teacher_id"]), order_id))
+    lost = []
+    for item in db.execute("SELECT * FROM order_items WHERE order_id = ?", (order_id,)).fetchall():
+        kept = item["slot_id"] and db.execute(
+            "UPDATE slots SET reservation_status = 'confirmed', pending_until = NULL WHERE id = ? AND reserved_by = ?",
+            (item["slot_id"], order["student_id"]),
+        ).rowcount
+        db.execute("UPDATE order_items SET status = ? WHERE id = ?", (new_status, item["id"]))
+        if not kept:
+            lost.append(item["id"])
+    if order["student_id"] and order["teacher_id"]:
+        db.execute(
+            "INSERT OR IGNORE INTO contacts(student_id, teacher_id, course_id) VALUES (?, ?, ?)",
+            (order["student_id"], order["teacher_id"], order["course_id"]),
+        )
+    return lost
+
+
+def refund_order_item(db, item_id, reason, actor_id=None):
+    """Rembourse une séance payée (Stripe, avec reprise du virement au
+    professeur et de la commission) ou annule une séance gratuite, puis
+    libère le créneau. Ne fait pas de commit : l'appelant commit aussitôt."""
+    item = db.execute(
+        "SELECT oi.*, o.stripe_payment_intent_id, o.student_id, o.teacher_id FROM order_items oi "
+        "JOIN orders o ON o.id = oi.order_id WHERE oi.id = ?",
+        (item_id,),
+    ).fetchone()
+    if not item:
+        raise PaymentError("Séance introuvable.")
+    if item["status"] == "free":
+        db.execute(
+            "UPDATE order_items SET status = 'canceled', refunded_at = ?, refund_reason = ? WHERE id = ? AND status = 'free'",
+            (utc_now_str(), reason, item_id),
+        )
+    elif item["status"] == "paid":
+        if not STRIPE_SECRET_KEY or not item["stripe_payment_intent_id"]:
+            raise PaymentError("Le remboursement en ligne n'est pas disponible pour le moment.")
+        try:
+            refund = stripe.Refund.create(
+                payment_intent=item["stripe_payment_intent_id"],
+                amount=item["amount_cents"],
+                reverse_transfer=True,
+                refund_application_fee=True,
+                metadata={"order_item_id": str(item_id)},
+                idempotency_key=f"refund-order-item-{item_id}",
+            )
+        except stripe.StripeError as exc:
+            app.logger.error("Remboursement Stripe refusé (ligne %s) : %s", item_id, exc)
+            raise PaymentError(
+                "Stripe n'a pas pu effectuer le remboursement. Réessayez plus tard ou contactez-nous."
+            ) from exc
+        if db.execute(
+            "UPDATE order_items SET status = 'refunded', stripe_refund_id = ?, refunded_at = ?, refund_reason = ? "
+            "WHERE id = ? AND status = 'paid'",
+            (to_plain(refund).get("id"), utc_now_str(), reason, item_id),
+        ).rowcount:
+            db.execute("UPDATE order_items SET credit_note_number = ? WHERE id = ?",
+                       (next_document_number(db, "A", item["teacher_id"]), item_id))
+    else:
+        raise PaymentError("Cette séance a déjà été remboursée ou annulée.")
+    if item["slot_id"] and item["student_id"]:
+        free_slot(db, item["slot_id"], only_if_reserved_by=item["student_id"])
+    recompute_order_status(db, item["order_id"])
+    audit(db, "remboursement" if item["status"] == "paid" else "annulation_gratuite",
+          target=f"order_item:{item_id}", details=f"{item['amount_cents']} c. — {reason}", actor_id=actor_id)
+
+
+def refund_lost_items(db, item_ids):
+    for item_id in item_ids:
+        try:
+            refund_order_item(db, item_id, "Créneau déjà pris au moment du paiement")
+            db.commit()
+        except PaymentError:
+            db.rollback()
+            app.logger.error("Remboursement automatique impossible pour la ligne %s", item_id)
+
+
+def active_item_for_slot(db, slot):
+    return db.execute(
+        "SELECT oi.*, o.student_id, o.teacher_status, o.paid_at FROM order_items oi JOIN orders o ON o.id = oi.order_id "
+        "WHERE oi.slot_id = ? AND o.student_id = ? AND oi.status IN ('paid', 'free', 'pending') "
+        "ORDER BY oi.id DESC LIMIT 1",
+        (slot["id"], slot["reserved_by"]),
+    ).fetchone()
+
+
+def student_can_cancel(slot, item):
+    """Annulation gratuite jusqu'à 12 h avant la séance. Au-delà, le droit de
+    rétractation légal (14 jours, professeur professionnel) reste ouvert tant
+    que la séance n'a pas commencé (C. conso., art. L. 221-18 et L. 221-25)."""
+    start = safe_slot_start(slot)
+    now = now_local()
+    if start <= now:
+        return False
+    if start - now >= CANCELLATION_MIN_DELAY:
+        return True
+    if item and item["status"] == "paid" and item["teacher_status"] in PRO_STATUSES:
+        paid_at = parse_db_utc(item["paid_at"])
+        return bool(paid_at and utc_now() - paid_at < WITHDRAWAL_PERIOD)
+    return False
+
+
+def cancel_reservation(db, slot, reason, actor_id=None):
+    """Annule la réservation d'un créneau en remboursant ce qui doit l'être."""
+    item = active_item_for_slot(db, slot)
+    if item and item["status"] == "pending":
+        order = db.execute("SELECT * FROM orders WHERE id = ?", (item["order_id"],)).fetchone()
+        if order["stripe_checkout_session_id"] and STRIPE_SECRET_KEY:
+            try:
+                stripe.checkout.Session.expire(order["stripe_checkout_session_id"])
+            except stripe.StripeError:
+                pass  # déjà expirée ou payée : un paiement tardif est remboursé automatiquement
+        release_pending_order(db, item["order_id"], status="canceled")
+        return
+    if item:
+        refund_order_item(db, item["id"], reason, actor_id=actor_id)
+        return
+    # Réservation de l'ancien système (porte-monnaie interne).
+    legacy = db.execute("SELECT * FROM payments WHERE slot_id = ? AND status = 'held'", (slot["id"],)).fetchone()
+    if legacy:
+        db.execute("UPDATE users SET wallet_cents = wallet_cents + ? WHERE id = ?", (legacy["amount_cents"], legacy["student_id"]))
+        db.execute(
+            "INSERT INTO wallet_transactions(user_id, amount_cents, kind, description, payment_id) VALUES (?, ?, 'refund', ?, ?)",
+            (legacy["student_id"], legacy["amount_cents"], "Remboursement (annulation)", legacy["id"]),
+        )
+        db.execute("UPDATE payments SET status = 'refunded', resolved_at = CURRENT_TIMESTAMP WHERE id = ?", (legacy["id"],))
+    free_slot(db, slot["id"])
+
+
+def fulfill_checkout_session(db, checkout_session):
+    """Traite une session Stripe Checkout terminée (webhook ou retour du
+    navigateur). Idempotent. Renvoie les lignes à rembourser après commit."""
+    cs = to_plain(checkout_session)
+    order_id = (cs.get("metadata") or {}).get("order_id") or cs.get("client_reference_id")
+    if not order_id or not str(order_id).isdigit():
+        return []
+    order = db.execute("SELECT * FROM orders WHERE id = ?", (int(order_id),)).fetchone()
+    if not order or order["stripe_checkout_session_id"] != cs.get("id"):
+        return []
+    if cs.get("payment_status") != "paid":
+        return []
+    payment_intent = cs.get("payment_intent")
+    if isinstance(payment_intent, dict):
+        payment_intent = payment_intent.get("id")
+    if order["status"] in ("expired", "canceled"):
+        # Paiement arrivé après l'abandon de la réservation : remboursement intégral.
+        try:
+            stripe.Refund.create(
+                payment_intent=payment_intent, reverse_transfer=True, refund_application_fee=True,
+                idempotency_key=f"refund-late-order-{order['id']}",
+            )
+            audit(db, "remboursement_paiement_tardif", target=f"order:{order['id']}")
+        except stripe.StripeError as exc:
+            audit(db, "ERREUR_remboursement_paiement_tardif", target=f"order:{order['id']}", details=str(exc))
+        return []
+    if cs.get("amount_total") != order["amount_cents"] or (cs.get("currency") or "").lower() != "eur":
+        audit(db, "ALERTE_montant_incoherent", target=f"order:{order['id']}",
+              details=f"attendu {order['amount_cents']}, reçu {cs.get('amount_total')} {cs.get('currency')}")
+        return []
+    lost = confirm_order(db, order["id"], payment_intent_id=payment_intent)
+    audit(db, "paiement_recu", target=f"order:{order['id']}", details=f"{order['amount_cents']} c.")
+    return lost
+
+
+def sync_stripe_account(db, user):
+    """Met à jour l'état du compte Stripe Connect d'un professeur."""
+    if not (STRIPE_SECRET_KEY and user["stripe_account_id"]):
+        return
     try:
-        due = db.execute(
-            "SELECT * FROM payments WHERE status = 'held' AND release_at <= ?",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),),
+        account = to_plain(stripe.Account.retrieve(user["stripe_account_id"]))
+    except stripe.StripeError as exc:
+        app.logger.warning("Lecture du compte Stripe %s impossible : %s", user["stripe_account_id"], exc)
+        return
+    apply_stripe_account(db, account)
+
+
+def apply_stripe_account(db, account):
+    db.execute(
+        "UPDATE users SET stripe_charges_enabled = ?, stripe_payouts_enabled = ?, stripe_details_submitted = ? "
+        "WHERE stripe_account_id = ?",
+        (int(bool(account.get("charges_enabled"))), int(bool(account.get("payouts_enabled"))),
+         int(bool(account.get("details_submitted"))), account.get("id")),
+    )
+
+
+def handle_stripe_event(db, event):
+    """Traite un événement Stripe vérifié. Renvoie les lignes à rembourser."""
+    etype = event.get("type")
+    obj = (event.get("data") or {}).get("object") or {}
+    if etype in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
+        return fulfill_checkout_session(db, obj)
+    if etype in ("checkout.session.expired", "checkout.session.async_payment_failed"):
+        order = db.execute("SELECT id FROM orders WHERE stripe_checkout_session_id = ?", (obj.get("id"),)).fetchone()
+        if order:
+            release_pending_order(db, order["id"], status="expired")
+        return []
+    if etype == "charge.refunded":
+        # Remboursement intégral fait directement depuis le tableau de bord Stripe.
+        payment_intent = obj.get("payment_intent")
+        if obj.get("refunded") and payment_intent:
+            order = db.execute("SELECT * FROM orders WHERE stripe_payment_intent_id = ?", (payment_intent,)).fetchone()
+            if order:
+                for item in db.execute("SELECT * FROM order_items WHERE order_id = ? AND status = 'paid'", (order["id"],)).fetchall():
+                    if db.execute(
+                        "UPDATE order_items SET status = 'refunded', refunded_at = ?, refund_reason = ? WHERE id = ? AND status = 'paid'",
+                        (utc_now_str(), "Remboursement effectué depuis Stripe", item["id"]),
+                    ).rowcount:
+                        db.execute("UPDATE order_items SET credit_note_number = ? WHERE id = ?",
+                                   (next_document_number(db, "A", order["teacher_id"]), item["id"]))
+                    if item["slot_id"] and order["student_id"]:
+                        free_slot(db, item["slot_id"], only_if_reserved_by=order["student_id"])
+                recompute_order_status(db, order["id"])
+        return []
+    if etype == "charge.dispute.created":
+        payment_intent = obj.get("payment_intent")
+        if payment_intent:
+            db.execute("UPDATE orders SET disputed = 1 WHERE stripe_payment_intent_id = ?", (payment_intent,))
+            audit(db, "litige_bancaire_ouvert", target=f"payment_intent:{payment_intent}")
+        return []
+    if etype == "account.updated":
+        apply_stripe_account(db, obj)
+        return []
+    return []
+
+
+def process_overdue_pending_orders(db):
+    """Réservations restées « en attente de paiement » après expiration de la
+    session Stripe (webhook manqué, navigateur fermé…)."""
+    limit = (utc_now() - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+    overdue = db.execute(
+        "SELECT * FROM orders WHERE status = 'pending' AND (expires_at IS NULL OR expires_at < ?) "
+        "AND created_at < ?",
+        (limit, (utc_now() - CHECKOUT_TTL - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")),
+    ).fetchall()
+    for order in overdue:
+        lost = []
+        if order["stripe_checkout_session_id"] and STRIPE_SECRET_KEY:
+            try:
+                cs = to_plain(stripe.checkout.Session.retrieve(order["stripe_checkout_session_id"]))
+            except stripe.StripeError:
+                continue  # on réessaiera au prochain passage
+            if cs.get("status") == "complete" and cs.get("payment_status") == "paid":
+                lost = fulfill_checkout_session(db, cs)
+            elif cs.get("status") == "open":
+                try:
+                    stripe.checkout.Session.expire(order["stripe_checkout_session_id"])
+                except stripe.StripeError:
+                    continue
+                release_pending_order(db, order["id"], "expired")
+            else:
+                release_pending_order(db, order["id"], "expired")
+        else:
+            release_pending_order(db, order["id"], "canceled")
+        db.commit()
+        refund_lost_items(db, lost)
+
+
+# ---------------------------------------------------------------------------
+# Justificatifs PDF (facture ou reçu, avoir, récapitulatif annuel)
+# ---------------------------------------------------------------------------
+def pdf_text(value):
+    return xml_escape(str(value or ""))
+
+
+def _pdf_styles():
+    styles = getSampleStyleSheet()
+    return {
+        "title": ParagraphStyle("t", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=16, alignment=0, spaceAfter=4),
+        "normal": ParagraphStyle("n", parent=styles["Normal"], fontName="Helvetica", fontSize=9.5, leading=13),
+        "small": ParagraphStyle("s", parent=styles["Normal"], fontName="Helvetica", fontSize=8, leading=11, textColor=colors.HexColor("#555555")),
+        "right": ParagraphStyle("r", parent=styles["Normal"], fontName="Helvetica", fontSize=9.5, leading=13, alignment=TA_RIGHT),
+    }
+
+
+def _pdf_table(rows, widths):
+    table = Table(rows, colWidths=widths)
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, colors.black),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.3, colors.HexColor("#bbbbbb")),
+        ("ALIGN", (-1, 0), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    return table
+
+
+def teacher_vat_mention(status):
+    if status == "micro":
+        return "TVA non applicable, art. 293 B du CGI."
+    return "Prestation fournie par un particulier non assujetti à la TVA."
+
+
+def pdf_parties(order, st):
+    status = order["teacher_status"] or "particulier"
+    seller = f"<b>{pdf_text(order['teacher_name'])}</b><br/>{pdf_text(TEACHER_STATUSES.get(status, ''))}"
+    if order["teacher_siret"]:
+        seller += f"<br/>SIRET : {pdf_text(order['teacher_siret'])}"
+    buyer = f"<b>{pdf_text(order['student_name'])}</b><br/>{pdf_text(order['student_email'])}"
+    table = Table(
+        [[Paragraph("Prestataire", st["small"]), Paragraph("Client", st["small"])],
+         [Paragraph(seller, st["normal"]), Paragraph(buyer, st["normal"])]],
+        colWidths=[85 * mm, 85 * mm],
+    )
+    table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
+    return table
+
+
+def pdf_footer(st):
+    return Paragraph(
+        f"Document établi par {pdf_text(LEGAL['site_name'])} ({pdf_text(LEGAL['editor_name'])}), plateforme de mise en "
+        "relation, au nom et pour le compte du professeur, conformément aux conditions générales de vente. "
+        "Le paiement a été encaissé par Stripe Payments Europe pour le compte du professeur ; "
+        "la plateforme ne détient pas les fonds.",
+        st["small"],
+    )
+
+
+def build_invoice_pdf(order, items):
+    st = _pdf_styles()
+    buf = BytesIO()
+    is_pro = order["teacher_status"] in PRO_STATUSES
+    label = "Facture" if is_pro else "Reçu de paiement"
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20 * mm, bottomMargin=20 * mm,
+                            leftMargin=20 * mm, rightMargin=20 * mm, title=f"{label} {order['invoice_number']}")
+    paid = parse_db_utc(order["paid_at"])
+    paid_str = paid.replace(tzinfo=timezone.utc).astimezone(PARIS).strftime("%d/%m/%Y") if paid else ""
+    rows = [["Désignation", "Séance", "Montant TTC"]]
+    total = 0
+    for it in items:
+        rows.append([
+            Paragraph(f"Cours particulier : {pdf_text(order['course_title'])}<br/>"
+                      f"<font size=8>{pdf_text(duree(it['duration_minutes']))} · "
+                      f"{pdf_text(MODE_LABELS.get(it['slot_mode'] or 'en_ligne', ''))}</font>", st["normal"]),
+            f"{it['slot_date']} {str(it['slot_time'])[:5]}",
+            euros(it["amount_cents"]).replace(" ", " ").replace(" ", " "),
+        ])
+        total += it["amount_cents"]
+    rows.append(["", "Total TTC", euros(total).replace(" ", " ").replace(" ", " ")])
+    elements = [
+        Paragraph(f"{label} n° {pdf_text(order['invoice_number'])}", st["title"]),
+        Paragraph(f"Date : {paid_str} · Commande n° {order['id']}", st["normal"]),
+        Spacer(1, 10), pdf_parties(order, st), Spacer(1, 14),
+        _pdf_table(rows, [100 * mm, 38 * mm, 32 * mm]), Spacer(1, 8),
+        Paragraph(pdf_text(teacher_vat_mention(order["teacher_status"])), st["normal"]),
+        Paragraph(f"Payé par carte bancaire le {paid_str}.", st["normal"]),
+        Spacer(1, 18), pdf_footer(st),
+    ]
+    doc.build(elements)
+    buf.seek(0)
+    return buf
+
+
+def build_credit_note_pdf(order, item):
+    st = _pdf_styles()
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20 * mm, bottomMargin=20 * mm,
+                            leftMargin=20 * mm, rightMargin=20 * mm, title=f"Avoir {item['credit_note_number']}")
+    refunded = parse_db_utc(item["refunded_at"])
+    refunded_str = refunded.replace(tzinfo=timezone.utc).astimezone(PARIS).strftime("%d/%m/%Y") if refunded else ""
+    amount = euros(item["amount_cents"]).replace(" ", " ").replace(" ", " ")
+    rows = [["Désignation", "Séance", "Montant TTC"],
+            [Paragraph(f"Remboursement : {pdf_text(order['course_title'])}<br/><font size=8>"
+                       f"{pdf_text(item['refund_reason'] or '')}</font>", st["normal"]),
+             f"{item['slot_date']} {str(item['slot_time'])[:5]}", f"- {amount}"]]
+    elements = [
+        Paragraph(f"Avoir n° {pdf_text(item['credit_note_number'])}", st["title"]),
+        Paragraph(f"Date : {refunded_str} · Se rapporte au document n° {pdf_text(order['invoice_number'])}", st["normal"]),
+        Spacer(1, 10), pdf_parties(order, st), Spacer(1, 14),
+        _pdf_table(rows, [100 * mm, 38 * mm, 32 * mm]), Spacer(1, 8),
+        Paragraph(f"Montant remboursé sur la carte utilisée pour le paiement : {amount}.", st["normal"]),
+        Spacer(1, 18), pdf_footer(st),
+    ]
+    doc.build(elements)
+    buf.seek(0)
+    return buf
+
+
+def teacher_year_summary(db, teacher_id, year):
+    rows = db.execute(
+        """
+        SELECT oi.amount_cents, oi.platform_fee_cents, oi.status, o.paid_at
+        FROM order_items oi JOIN orders o ON o.id = oi.order_id
+        WHERE o.teacher_id = ? AND oi.status IN ('paid', 'refunded') AND substr(o.paid_at, 1, 4) = ?
+        """,
+        (teacher_id, str(year)),
+    ).fetchall()
+    paid = [r for r in rows if r["status"] == "paid"]
+    gross = sum(r["amount_cents"] for r in paid)
+    fees = sum(r["platform_fee_cents"] for r in paid)
+    return {"year": year, "count": len(paid), "gross": gross, "fees": fees, "net": gross - fees,
+            "refunded": sum(1 for r in rows if r["status"] == "refunded")}
+
+
+def build_year_summary_pdf(teacher, summary):
+    st = _pdf_styles()
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20 * mm, bottomMargin=20 * mm,
+                            leftMargin=20 * mm, rightMargin=20 * mm, title=f"Récapitulatif {summary['year']}")
+    fmt = lambda c: euros(c).replace(" ", " ").replace(" ", " ")  # noqa: E731
+    rows = [["Rubrique", "", "Montant"],
+            ["Séances payées (hors remboursements)", str(summary["count"]), fmt(summary["gross"])],
+            [f"Commission de la plateforme ({PLATFORM_FEE_PERCENT} %)", "", f"- {fmt(summary['fees'])}"],
+            ["Montant net perçu", "", fmt(summary["net"])]]
+    elements = [
+        Paragraph(f"Récapitulatif annuel {summary['year']}", st["title"]),
+        Paragraph("Transactions réalisées par l'intermédiaire de la plateforme (article 242 bis du CGI).", st["normal"]),
+        Spacer(1, 10),
+        Paragraph(f"<b>{pdf_text(teacher['name'])}</b><br/>{pdf_text(teacher['email'])}<br/>"
+                  f"{pdf_text(TEACHER_STATUSES.get(teacher['teacher_status'] or '', 'Statut non renseigné'))}"
+                  + (f"<br/>SIRET : {pdf_text(teacher['siret'])}" if teacher["siret"] else ""), st["normal"]),
+        Spacer(1, 14), _pdf_table(rows, [110 * mm, 20 * mm, 40 * mm]), Spacer(1, 12),
+        Paragraph("Les revenus perçus par l'intermédiaire de plateformes en ligne sont soumis à l'impôt sur le revenu "
+                  "et, selon les cas, aux cotisations sociales. Informations : www.impots.gouv.fr et www.urssaf.fr. "
+                  "Les plateformes transmettent chaque année à l'administration fiscale les informations relatives aux "
+                  "revenus de leurs utilisateurs (directive (UE) 2021/514, dite DAC7).", st["small"]),
+        Spacer(1, 12), Paragraph(f"Document établi le {now_local().strftime('%d/%m/%Y')} par {pdf_text(LEGAL['site_name'])}.", st["small"]),
+    ]
+    doc.build(elements)
+    buf.seek(0)
+    return buf
+
+
+# ---------------------------------------------------------------------------
+# Suppression et anonymisation des comptes
+# ---------------------------------------------------------------------------
+def upcoming_reservations(db, user):
+    """Créneaux à venir impliquant l'utilisateur (comme élève ou comme prof)."""
+    if user["role"] == "prof":
+        rows = db.execute(
+            "SELECT sl.* FROM slots sl JOIN courses c ON c.id = sl.course_id WHERE c.teacher_id = ? AND sl.reserved_by IS NOT NULL",
+            (user["id"],),
         ).fetchall()
-        for payment in due:
-            release_payment(db, payment, reason="auto")
-        if due:
+    else:
+        rows = db.execute("SELECT * FROM slots WHERE reserved_by = ?", (user["id"],)).fetchall()
+    now = now_local()
+    return [r for r in rows if safe_slot_end(r) > now]
+
+
+def delete_user_messages(db, user_id):
+    for m in db.execute(
+        "SELECT attachment_filename FROM messages WHERE (sender_id = ? OR recipient_id = ?) AND attachment_filename IS NOT NULL",
+        (user_id, user_id),
+    ).fetchall():
+        delete_file_quietly(MESSAGE_ATTACHMENTS_DIR, m["attachment_filename"])
+    db.execute("DELETE FROM messages WHERE sender_id = ? OR recipient_id = ?", (user_id, user_id))
+
+
+def erase_user(db, user, reason, actor_id=None, force_refunds=False):
+    """Supprime un compte. Les commandes sont des pièces comptables à
+    conserver 10 ans : si l'utilisateur en a, le compte est anonymisé plutôt
+    que supprimé. Lève PaymentError si un remboursement échoue."""
+    upcoming = upcoming_reservations(db, user)
+    if upcoming and not force_refunds:
+        raise PaymentError("Ce compte a encore des séances réservées à venir : annulez-les d'abord.")
+    for slot in upcoming:
+        cancel_reservation(db, slot, f"Suppression de compte ({reason})", actor_id=actor_id)
+    has_orders = db.execute(
+        "SELECT 1 FROM orders WHERE student_id = ? OR teacher_id = ? LIMIT 1", (user["id"], user["id"])
+    ).fetchone() or db.execute(
+        "SELECT 1 FROM payments WHERE student_id = ? OR teacher_id = ? LIMIT 1", (user["id"], user["id"])
+    ).fetchone()
+    delete_file_quietly(PROFILE_PHOTOS_DIR, user["photo"])
+    delete_user_messages(db, user["id"])
+    if has_orders:
+        # Les créneaux libres sont supprimés ; les cours restent pour les justificatifs.
+        db.execute(
+            "DELETE FROM slots WHERE reserved_by IS NULL AND course_id IN (SELECT id FROM courses WHERE teacher_id = ?)",
+            (user["id"],),
+        )
+        db.execute("DELETE FROM contacts WHERE student_id = ? OR teacher_id = ?", (user["id"], user["id"]))
+        db.execute("DELETE FROM ratings WHERE student_id = ? OR teacher_id = ?", (user["id"], user["id"]))
+        db.execute(
+            "UPDATE users SET name = 'Compte supprimé', email = ?, password_hash = ?, bio = NULL, photo = NULL, "
+            "education_level = NULL, approved = 0, deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (f"supprime-{user['id']}-{secrets.token_hex(4)}@invalid", generate_password_hash(secrets.token_urlsafe(32)), user["id"]),
+        )
+    else:
+        db.execute("DELETE FROM users WHERE id = ?", (user["id"],))
+    audit(db, "suppression_compte", target=f"user:{user['id']}", details=reason, actor_id=actor_id)
+
+
+# ---------------------------------------------------------------------------
+# Tâche de maintenance (réservations expirées, durées de conservation)
+# ---------------------------------------------------------------------------
+_last_daily_run = {"date": None}
+
+
+def run_maintenance_once():
+    db = connect_db()
+    try:
+        process_overdue_pending_orders(db)
+        db.execute("DELETE FROM signals WHERE created_at < ?",
+                   ((utc_now() - RETENTION_SIGNALS).strftime("%Y-%m-%d %H:%M:%S"),))
+        db.execute("DELETE FROM whiteboard_strokes WHERE created_at < ?",
+                   ((utc_now() - RETENTION_WHITEBOARD).strftime("%Y-%m-%d %H:%M:%S"),))
+        db.commit()
+        today = date.today()
+        if _last_daily_run["date"] != today:
+            _last_daily_run["date"] = today
+            db.execute("DELETE FROM audit_log WHERE created_at < ?",
+                       ((utc_now() - RETENTION_AUDIT_LOG).strftime("%Y-%m-%d %H:%M:%S"),))
+            db.execute("DELETE FROM stripe_events WHERE received_at < ?",
+                       ((utc_now() - timedelta(days=90)).strftime("%Y-%m-%d %H:%M:%S"),))
+            db.execute("DELETE FROM reports WHERE status = 'closed' AND resolved_at < ?",
+                       ((utc_now() - timedelta(days=365)).strftime("%Y-%m-%d %H:%M:%S"),))
+            limit = (utc_now() - RETENTION_INACTIVE_ACCOUNT).strftime("%Y-%m-%d %H:%M:%S")
+            for user in db.execute(
+                "SELECT * FROM users WHERE role != 'admin' AND deleted_at IS NULL AND last_login_at < ?", (limit,)
+            ).fetchall():
+                try:
+                    erase_user(db, user, "inactivité de plus de 3 ans", force_refunds=False)
+                except PaymentError:
+                    db.rollback()
+                    continue
+                db.commit()
             db.commit()
     finally:
         db.close()
 
 
-def start_auto_release_background_thread():
-    """Démarre un thread démon qui libère périodiquement les paiements dont
-    le délai de 24h est écoulé. Solution simple adaptée à un déploiement
-    mono-processus ; pour un déploiement multi-worker (ex. plusieurs workers
-    gunicorn), préférer un vrai job planifié (cron, Celery beat...) qui
-    appelle run_auto_release_once()."""
+def start_maintenance_thread():
+    lock_handle = None
+    try:
+        import fcntl  # un seul worker gunicorn exécute la maintenance
+
+        lock_handle = open(os.path.join(DATA_DIR, ".maintenance.lock"), "w")
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (ImportError, OSError):
+        if lock_handle is not None:
+            lock_handle.close()
+            return  # un autre processus détient déjà le verrou
 
     def loop():
         while True:
             try:
-                run_auto_release_once()
-            except Exception as exc:  # ne jamais laisser le thread mourir silencieusement
-                print(f"[auto-release] erreur : {exc}")
-            time_mod.sleep(AUTO_RELEASE_POLL_SECONDS)
+                run_maintenance_once()
+            except Exception:  # la boucle ne doit jamais s'arrêter
+                app.logger.exception("Erreur dans la tâche de maintenance")
+            time_mod.sleep(MAINTENANCE_INTERVAL_SECONDS)
 
-    thread = threading.Thread(target=loop, daemon=True)
-    thread.start()
-
-
-@app.template_global("seance_terminee")
-def seance_terminee(slot):
-    """Utilisable dans les templates : renvoie True si le créneau (slot_date/
-    slot_time/duration_minutes) est déjà terminé, donc éligible à une facture."""
-    try:
-        return slot_end_datetime(slot) <= datetime.now()
-    except (TypeError, ValueError, KeyError):
-        return False
-
-
-@app.template_filter("duree_lisible")
-def duree_lisible(minutes):
-    minutes = int(minutes)
-    h, m = divmod(minutes, 60)
-    if h and m:
-        return f"{h} h {m:02d}"
-    if h:
-        return f"{h} h"
-    return f"{m} min"
-
-
-MOIS_FR = [
-    "", "Janvier", "Février", "Mars", "Avril", "Mai", "Juin",
-    "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre",
-]
-JOURS_FR = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
-
-
-def build_month_weeks(year, month, events_by_date):
-    """Construit les semaines (listes de 7 jours) du mois demandé, avec les
-    évènements du jour attachés à chaque case, pour affichage en grille."""
-    cal = calendar_mod.Calendar(firstweekday=0)
-    weeks = []
-    for week in cal.monthdatescalendar(year, month):
-        week_cells = []
-        for day in week:
-            key = day.isoformat()
-            week_cells.append(
-                {
-                    "date": day,
-                    "in_month": day.month == month,
-                    "is_today": day == date.today(),
-                    "events": events_by_date.get(key, []),
-                }
-            )
-        weeks.append(week_cells)
-    return weeks
-
-
-def current_user():
-    user_id = session.get("user_id")
-    if not user_id:
-        return None
-    return get_db().execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-
-
-@app.context_processor
-def inject_current_user():
-    return {"current_user": current_user()}
-
-
-def get_registration_mode():
-    """Renvoie 'tous' (profs + élèves) ou 'profs' (professeurs uniquement)."""
-    db = get_db()
-    row = db.execute("SELECT value FROM settings WHERE key = 'registration_mode'").fetchone()
-    return row["value"] if row else "tous"
-
-
-def set_registration_mode(mode):
-    if mode not in ("tous", "profs"):
-        return
-    db = get_db()
-    db.execute(
-        "INSERT INTO settings(key, value) VALUES ('registration_mode', ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        (mode,),
-    )
-    db.commit()
-
-
-def dashboard_url_for(role):
-    if role == "admin":
-        return url_for("admin_dashboard")
-    if role == "prof":
-        return url_for("prof_dashboard")
-    return url_for("etudiant")
-
-
-def login_required(role=None):
-    """role peut être None (connexion simple requise), une chaîne (un seul
-    rôle autorisé) ou un tuple/liste de rôles autorisés."""
-    allowed_roles = None
-    if role is not None:
-        allowed_roles = (role,) if isinstance(role, str) else tuple(role)
-
-    def decorator(view):
-        @wraps(view)
-        def wrapped(*args, **kwargs):
-            user = current_user()
-            if not user or (allowed_roles and user["role"] not in allowed_roles):
-                message = (
-                    "Connectez-vous avec un compte professeur pour accéder à cette page."
-                    if allowed_roles == ("prof",)
-                    else "Connectez-vous avec un compte étudiant pour accéder à cette page."
-                    if allowed_roles == ("etudiant",)
-                    else "Connectez-vous avec un compte administrateur pour accéder à cette page."
-                    if allowed_roles == ("admin",)
-                    else "Connectez-vous pour accéder à cette page."
-                )
-                flash(message, "error")
-                return redirect(url_for("connexion"))
-            return view(*args, **kwargs)
-
-        return wrapped
-
-    return decorator
+    threading.Thread(target=loop, daemon=True, name="maintenance").start()
+    app.config["_maintenance_lock"] = lock_handle
 
 
 # ---------------------------------------------------------------------------
-# Routes — Accueil
+# Accueil et pages d'information
 # ---------------------------------------------------------------------------
 @app.route("/")
 def index():
@@ -1228,1391 +1934,180 @@ def presentation():
     return render_template("presentation.html")
 
 
+@app.route("/mentions-legales")
+def mentions_legales():
+    return render_template("mentions_legales.html")
+
+
 @app.route("/cgu")
 def cgu():
     return render_template("cgu.html")
 
 
+@app.route("/cgv")
+def cgv():
+    return render_template("cgv.html", cancellation_hours=int(CANCELLATION_MIN_DELAY.total_seconds() // 3600))
+
+
+@app.route("/confidentialite")
+def confidentialite():
+    return render_template("confidentialite.html", stun_urls=WEBRTC_STUN_URLS)
+
+
+REPORT_CATEGORIES = {
+    "contenu_illicite": "Contenu illicite (propos haineux, harcèlement, contenu sexuel, etc.)",
+    "mineur": "Mise en danger d'un mineur",
+    "fraude": "Fraude, usurpation d'identité ou faux profil",
+    "seance": "Problème avec une séance ou un paiement",
+    "autre": "Autre",
+}
+
+
+@app.route("/signaler", methods=["GET", "POST"])
+def signaler():
+    user = current_user()
+    db = get_db()
+    item = None
+    item_id = request.values.get("seance", "")
+    if user and item_id.isdigit():
+        item = db.execute(
+            "SELECT oi.*, o.course_title, o.student_id, o.teacher_id FROM order_items oi JOIN orders o ON o.id = oi.order_id "
+            "WHERE oi.id = ? AND (o.student_id = ? OR o.teacher_id = ?)",
+            (int(item_id), user["id"], user["id"]),
+        ).fetchone()
+
+    if request.method == "POST":
+        if is_rate_limited(f"report:{client_ip()}", 5, 3600):
+            flash("Trop de signalements envoyés depuis cette adresse. Réessayez plus tard.", "error")
+            return render_template("signaler.html", categories=REPORT_CATEGORIES, item=item, form=request.form), 429
+        category = request.form.get("category", "")
+        description = form_value("description", "report", multiline=True)
+        location = clean(request.form.get("location", ""), 300)
+        name = form_value("name", "name") if not user else user["name"]
+        email = clean(request.form.get("email", ""), LIMITS["email"]).lower() if not user else user["email"]
+        errors = []
+        if category not in REPORT_CATEGORIES:
+            errors.append("Choisissez le motif du signalement.")
+        if len(description) < 10:
+            errors.append("Décrivez le problème en quelques phrases.")
+        if not user and email and not EMAIL_RE.match(email):
+            errors.append("L'adresse e-mail n'est pas valide.")
+        if not request.form.get("good_faith"):
+            errors.append("Merci de confirmer que votre signalement est fait de bonne foi.")
+        if errors:
+            for e in errors:
+                flash(e, "error")
+            return render_template("signaler.html", categories=REPORT_CATEGORIES, item=item, form=request.form)
+        db.execute(
+            "INSERT INTO reports(reporter_id, reporter_name, reporter_email, category, location, description, order_item_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user["id"] if user else None, name or None, email or None, category, location or None, description,
+             item["id"] if item else None),
+        )
+        db.commit()
+        flash("Votre signalement a été transmis à l'équipe. Il sera examiné dans les meilleurs délais.", "success")
+        return redirect(url_for("presentation"))
+    return render_template("signaler.html", categories=REPORT_CATEGORIES, item=item, form={})
+
+
+# ---------------------------------------------------------------------------
+# Liste et calendrier des cours
+# ---------------------------------------------------------------------------
 def parse_course_filters(args):
-    """Lit les paramètres de filtre de recherche de cours depuis la querystring
-    (partagé entre la vue liste et la vue calendrier)."""
-    return {
-        "q": args.get("q", "").strip(),
-        "subject": args.get("subject", "").strip(),
-        "level": args.get("level", "").strip(),
-        "teacher_id": args.get("teacher_id", "").strip(),
-        "min_rating": args.get("min_rating", "").strip(),
-        "mode": args.get("mode", "").strip(),
-        "city": args.get("city", "").strip(),
-    }
+    return {k: clean(args.get(k, ""), 80) for k in ("q", "subject", "level", "teacher_id", "min_rating", "mode", "city")}
 
 
 def build_course_query(filters):
-    """Construit la clause WHERE + les paramètres SQL correspondant aux
-    filtres de recherche de cours (partagé entre la vue liste et la vue
-    calendrier)."""
-    # On ne liste que les cours ayant au moins un créneau encore libre : la
-    # réservation se fait désormais créneau par créneau, pas cours entier.
+    today = now_local().date().isoformat()
     conditions = [
-        "EXISTS (SELECT 1 FROM slots s WHERE s.course_id = c.id AND s.reserved_by IS NULL)",
-        # Les cours d'un prof pas encore validé par l'administrateur ne sont
-        # jamais affichés publiquement.
         "u.approved = 1",
+        "u.deleted_at IS NULL",
+        "EXISTS (SELECT 1 FROM slots s WHERE s.course_id = c.id AND s.reserved_by IS NULL AND s.slot_date >= ?)",
     ]
-    params = []
-
+    params = [today]
+    if STRIPE_SECRET_KEY:
+        conditions.append("(c.price_cents = 0 OR (u.stripe_account_id IS NOT NULL AND u.stripe_charges_enabled = 1))")
+    else:
+        conditions.append("c.price_cents = 0")
     if filters["q"]:
-        conditions.append("(c.title LIKE ? OR c.description LIKE ?)")
-        like = f"%{filters['q']}%"
-        params.extend([like, like])
-
+        conditions.append("(c.title LIKE ? ESCAPE '\\' OR c.description LIKE ? ESCAPE '\\')")
+        like = "%" + filters["q"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        params += [like, like]
     if filters["subject"] in MATIERES:
         conditions.append("INSTR(',' || REPLACE(c.subject, ', ', ',') || ',', ',' || ? || ',') > 0")
         params.append(filters["subject"])
-
     if filters["level"] in NIVEAUX:
         conditions.append("INSTR(',' || REPLACE(c.level, ', ', ',') || ',', ',' || ? || ',') > 0")
         params.append(filters["level"])
-
     if filters["mode"] == "en_ligne":
         conditions.append("c.mode IN ('en_ligne', 'les_deux')")
     elif filters["mode"] == "presentiel":
         conditions.append("c.mode IN ('presentiel', 'les_deux')")
-
     if filters["city"]:
-        conditions.append("c.city LIKE ?")
-        params.append(f"%{filters['city']}%")
-
+        conditions.append("c.city LIKE ? ESCAPE '\\'")
+        params.append("%" + filters["city"].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%")
     if filters["teacher_id"].isdigit():
         conditions.append("c.teacher_id = ?")
         params.append(int(filters["teacher_id"]))
-
     if filters["min_rating"].isdigit() and 1 <= int(filters["min_rating"]) <= 5:
-        # Un prof sans aucune note (AVG = NULL) n'est jamais retenu par ce filtre.
-        conditions.append(
-            "(SELECT AVG(rating) FROM ratings r WHERE r.teacher_id = c.teacher_id) >= ?"
-        )
+        conditions.append("(SELECT AVG(rating) FROM ratings r WHERE r.teacher_id = c.teacher_id) >= ?")
         params.append(int(filters["min_rating"]))
-
-    where_clause = " AND ".join(conditions) if conditions else "1=1"
-    return where_clause, params
+    return " AND ".join(conditions), params
 
 
 def fetch_filtered_courses(db, filters):
     where_clause, params = build_course_query(filters)
-    rows = db.execute(
+    return db.execute(
         f"""
         SELECT c.*, u.name AS teacher_name, u.bio AS teacher_bio, u.photo AS teacher_photo,
-               u.education_level AS teacher_education_level
-        FROM courses c
-        JOIN users u ON u.id = c.teacher_id
+               u.education_level AS teacher_education_level, u.teacher_status, u.siret AS teacher_siret
+        FROM courses c JOIN users u ON u.id = c.teacher_id
         WHERE {where_clause}
         ORDER BY c.id DESC
         """,
         params,
     ).fetchall()
-    return rows
+
+
+def approved_teachers(db):
+    return db.execute(
+        "SELECT id, name FROM users WHERE role = 'prof' AND approved = 1 AND deleted_at IS NULL ORDER BY name"
+    ).fetchall()
 
 
 @app.route("/cours")
 def cours():
     db = get_db()
-    user = current_user()
-
     filters = parse_course_filters(request.args)
     rows = fetch_filtered_courses(db, filters)
-
-    teachers = db.execute(
-        "SELECT id, name FROM users WHERE role = 'prof' AND approved = 1 ORDER BY name"
-    ).fetchall()
-
-    slots_map = get_slots_map(db, [r["id"] for r in rows])
-    ratings_map = get_teacher_ratings_map(db, [r["teacher_id"] for r in rows])
+    now = now_local()
+    slots_map = {
+        cid: [s for s in slots if safe_slot_start(s) > now]
+        for cid, slots in get_slots_map(db, [r["id"] for r in rows]).items()
+    }
+    bookable = {
+        s["id"] for slots in slots_map.values() for s in slots
+        if s["reserved_by"] is None and safe_slot_start(s) >= now + BOOKING_MIN_NOTICE
+    }
     return render_template(
         "cours.html",
         courses=rows,
         slots_map=slots_map,
-        ratings_map=ratings_map,
+        bookable=bookable,
+        ratings_map=get_teacher_ratings_map(db, [r["teacher_id"] for r in rows]),
         matieres=MATIERES,
         niveaux=NIVEAUX,
-        teachers=teachers,
-        mode_labels=MODE_LABELS,
+        teachers=approved_teachers(db),
         filters=filters,
     )
 
 
-@app.route("/cours/calendrier")
-def cours_calendrier():
-    """Vue calendrier de la recherche de cours : affiche, sur une grille
-    mensuelle, tous les créneaux encore disponibles correspondant aux mêmes
-    filtres que la liste des cours (matière, niveau, modalité, ville,
-    professeur, note minimale, recherche libre)."""
-    db = get_db()
-    filters = parse_course_filters(request.args)
-    year, month = resolve_month(request.args)
-    (prev_year, prev_month), (next_year, next_month) = month_nav(year, month)
-
-    courses = fetch_filtered_courses(db, filters)
-    teachers = db.execute(
-        "SELECT id, name FROM users WHERE role = 'prof' AND approved = 1 ORDER BY name"
-    ).fetchall()
-
-    slots_map = get_slots_map(db, [c["id"] for c in courses])
-
-    events_by_date = {}
-    for c in courses:
-        for s in slots_map.get(c["id"], []):
-            if s["reserved_by"] is not None:
-                continue
-            events_by_date.setdefault(s["slot_date"], []).append(
-                {
-                    "title": c["title"],
-                    "subtitle": f"{c['subject']} · {c['level']} · {c['teacher_name']}",
-                    "time": s["slot_time"],
-                    "duration": s["duration_minutes"],
-                    "status": "disponible",
-                    "course_id": c["id"],
-                }
-            )
-
-    # Chaque case du calendrier trie ses créneaux par heure.
-    for evs in events_by_date.values():
-        evs.sort(key=lambda e: e["time"])
-
-    weeks = build_month_weeks(year, month, events_by_date)
-
-    nav_args = {k: v for k, v in filters.items() if v}
-    return render_template(
-        "cours_calendrier.html",
-        weeks=weeks,
-        month_label=f"{MOIS_FR[month]} {year}",
-        jours=JOURS_FR,
-        prev_link=url_for("cours_calendrier", year=prev_year, month=prev_month, **nav_args),
-        next_link=url_for("cours_calendrier", year=next_year, month=next_month, **nav_args),
-        today_link=url_for("cours_calendrier", **nav_args),
-        matieres=MATIERES,
-        niveaux=NIVEAUX,
-        teachers=teachers,
-        filters=filters,
-        courses_count=len(courses),
-    )
-
-
-@app.route("/cours/<int:course_id>/inscription", methods=["POST"])
-@login_required(role="etudiant")
-def inscription_cours(course_id):
-    db = get_db()
-    course = db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone()
-    if not course:
-        flash("Cours introuvable.", "error")
-        return redirect(url_for("cours"))
-
-    slot_ids = [int(sid) for sid in request.form.getlist("slot_id[]") if sid.isdigit()]
-    notes = request.form.get("notes", "").strip() or None
-
-    if not slot_ids:
-        flash("Sélectionnez au moins un créneau à réserver.", "error")
-        return redirect(url_for("cours"))
-
-    price = course["price_cents"] or 0
-    total_cost = price * len(slot_ids)
-    student = current_user()
-    if total_cost > (student["wallet_cents"] or 0):
-        flash(
-            f"Solde insuffisant : cette réservation coûte {euros(total_cost)} mais votre "
-            f"portefeuille contient {euros(student['wallet_cents'])}. Rechargez votre compte.",
-            "error",
-        )
-        return redirect(url_for("portefeuille"))
-
-    # Modalité effective du créneau : fixée par le cours, sauf si celui-ci
-    # propose les deux, auquel cas l'élève choisit pour chaque créneau réservé.
-    reserved = 0
-    for slot_id in slot_ids:
-        if course["mode"] == "les_deux":
-            chosen = request.form.get(f"slot_mode_{slot_id}", "")
-            slot_mode = chosen if chosen in ("en_ligne", "presentiel") else "en_ligne"
-        else:
-            slot_mode = course["mode"]
-        cur = db.execute(
-            """
-            UPDATE slots SET reserved_by = ?, student_notes = ?, slot_mode = ?
-            WHERE id = ? AND course_id = ? AND reserved_by IS NULL
-            """,
-            (student["id"], notes, slot_mode, slot_id, course_id),
-        )
-        if cur.rowcount:
-            reserved += 1
-            slot = db.execute("SELECT * FROM slots WHERE id = ?", (slot_id,)).fetchone()
-            create_payment_hold(db, slot, course, student["id"])
-
-    if reserved:
-        # On garde une trace durable de la mise en relation élève/prof pour la
-        # messagerie, même si l'élève annule ses créneaux plus tard.
-        db.execute(
-            "INSERT OR IGNORE INTO contacts(student_id, teacher_id, course_id) VALUES (?, ?, ?)",
-            (student["id"], course["teacher_id"], course_id),
-        )
-        db.commit()
-        if reserved == len(slot_ids):
-            flash(
-                f"{reserved} créneau(x) réservé(s) et payé(s) ({euros(price * reserved)}) ! "
-                "L'argent est conservé en séquestre et sera versé au professeur 24h après le "
-                "cours, sauf si vous confirmez avant ou demandez un remboursement.",
-                "success",
-            )
-        else:
-            flash(
-                f"{reserved} créneau(x) réservé(s) — certains créneaux choisis venaient "
-                "d'être pris par un autre élève.",
-                "error",
-            )
-    else:
-        db.rollback()
-        flash("Les créneaux choisis venaient d'être réservés par un autre élève.", "error")
-    return redirect(url_for("cours"))
-
-
-@app.route("/cours/<int:course_id>/slots/<int:slot_id>/desinscription", methods=["POST"])
-@login_required(role="etudiant")
-def desinscription_cours(course_id, slot_id):
-    db = get_db()
-    slot = db.execute(
-        "SELECT * FROM slots WHERE id = ? AND course_id = ? AND reserved_by = ?",
-        (slot_id, course_id, current_user()["id"]),
-    ).fetchone()
-    if not slot:
-        flash("Créneau introuvable ou déjà annulé.", "error")
-        return redirect(request.referrer or url_for("etudiant"))
-
-    if not slot_is_cancellable(slot):
-        flash(
-            "Impossible d'annuler ce créneau : il commence dans moins de 12h. "
-            "Passé ce délai, la séance ne peut plus être annulée.",
-            "error",
-        )
-        return redirect(request.referrer or url_for("etudiant"))
-
-    cur = db.execute(
-        """
-        UPDATE slots SET reserved_by = NULL, student_notes = NULL, slot_mode = NULL
-        WHERE id = ? AND course_id = ? AND reserved_by = ?
-        """,
-        (slot_id, course_id, current_user()["id"]),
-    )
-    if cur.rowcount:
-        # Si un paiement était en séquestre pour ce créneau, on rembourse
-        # intégralement l'élève sur son portefeuille interne.
-        payment = db.execute(
-            "SELECT * FROM payments WHERE slot_id = ? AND status = 'held'", (slot_id,)
-        ).fetchone()
-        if payment:
-            refund_payment(db, payment)
-    db.commit()
-    flash("Vous avez annulé ce créneau (le paiement éventuel a été remboursé sur votre portefeuille).", "success")
-    return redirect(request.referrer or url_for("etudiant"))
-
-
-# ---------------------------------------------------------------------------
-# Routes — Portefeuille & paiements (Stripe)
-# ---------------------------------------------------------------------------
-@app.route("/portefeuille")
-@login_required()
-def portefeuille():
-    db = get_db()
-    user = current_user()
-    transactions = db.execute(
-        "SELECT * FROM wallet_transactions WHERE user_id = ? ORDER BY id DESC LIMIT 50",
-        (user["id"],),
-    ).fetchall()
-    withdrawals = db.execute(
-        "SELECT * FROM withdrawals WHERE user_id = ? ORDER BY id DESC LIMIT 50",
-        (user["id"],),
-    ).fetchall()
-    return render_template(
-        "portefeuille.html",
-        transactions=transactions,
-        withdrawals=withdrawals,
-        topup_amounts=WALLET_TOPUP_AMOUNTS,
-        withdrawal_methods=WITHDRAWAL_METHODS,
-        stripe_configured=bool(STRIPE_SECRET_KEY),
-        stripe_connect_ready=bool(user["stripe_account_id"]),
-    )
-
-
-@app.route("/portefeuille/retirer", methods=["POST"])
-@login_required()
-def portefeuille_retirer():
-    db = get_db()
-    user = current_user()
-
-    amount_raw = request.form.get("amount", "").strip().replace(",", ".")
-    method = request.form.get("method", "").strip()
-    details = request.form.get("details", "").strip()
-
-    try:
-        amount_euros = float(amount_raw)
-        if amount_euros <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        flash("Montant de retrait invalide.", "error")
-        return redirect(url_for("portefeuille"))
-
-    amount_cents = round(amount_euros * 100)
-
-    try:
-        if method == "stripe":
-            if user["role"] not in ("prof", "etudiant"):
-                raise WithdrawalError("Le versement Stripe est réservé aux professeurs et aux élèves.")
-            if not user["stripe_account_id"]:
-                raise WithdrawalError("Configurez d'abord votre compte bancaire Stripe Connect.")
-        withdrawal_id = request_withdrawal(db, user, amount_cents, method, details)
-        if method == "stripe":
-            transfer = stripe.Transfer.create(
-                amount=amount_cents,
-                currency="eur",
-                destination=user["stripe_account_id"],
-                description=f"Retrait CoursConnect #{withdrawal_id}",
-                metadata={"coursconnect_withdrawal_id": str(withdrawal_id), "user_id": str(user["id"])},
-                idempotency_key=f"coursconnect-withdrawal-{withdrawal_id}",
-            )
-            db.execute(
-                "UPDATE withdrawals SET status = 'paid', stripe_transfer_id = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (transfer.id, withdrawal_id),
-            )
-    except WithdrawalError as exc:
-        db.rollback()
-        flash(str(exc), "error")
-        return redirect(url_for("portefeuille"))
-    except Exception as exc:
-        db.rollback()
-        flash(f"Le versement Stripe n'a pas pu être lancé : {exc}", "error")
-        return redirect(url_for("portefeuille"))
-
-    db.commit()
-    if method == "stripe":
-        flash(f"Versement de {euros(amount_cents)} lancé via Stripe Connect. Les délais bancaires de Stripe s'appliquent.", "success")
-    else:
-        flash(f"Demande de retrait de {euros(amount_cents)} envoyée. Elle sera traitée par un administrateur.", "success")
-    return redirect(url_for("portefeuille"))
-
-
-@app.route("/portefeuille/connect/onboarding")
-@login_required()
-def portefeuille_connect_onboarding():
-    user = current_user()
-    if user["role"] not in ("prof", "etudiant"):
-        flash("Stripe Connect est réservé aux professeurs et aux élèves.", "error")
-        return redirect(url_for("portefeuille"))
-    db = get_db()
-    try:
-        link = create_stripe_onboarding_link(db, user)
-        db.commit()
-    except WithdrawalError as exc:
-        db.rollback()
-        flash(str(exc), "error")
-        return redirect(url_for("portefeuille"))
-    return redirect(link.url, code=303)
-
-
-@app.route("/portefeuille/connect/retour")
-@login_required()
-def portefeuille_connect_return():
-    flash("Votre compte Stripe Connect a été enregistré. Stripe peut encore demander des informations complémentaires avant le premier versement.", "success")
-    return redirect(url_for("portefeuille"))
-
-
-@app.route("/portefeuille/recharger", methods=["POST"])
-@login_required(role="etudiant")
-def portefeuille_recharger():
-    if not STRIPE_SECRET_KEY:
-        flash(
-            "Le paiement par carte n'est pas encore configuré sur ce serveur "
-            "(variable d'environnement STRIPE_SECRET_KEY manquante).",
-            "error",
-        )
-        return redirect(url_for("portefeuille"))
-
-    amount_raw = request.form.get("amount", "").strip().replace(",", ".")
-    try:
-        amount_euros = float(amount_raw)
-        if amount_euros < 1:
-            raise ValueError
-    except (TypeError, ValueError):
-        flash("Montant de recharge invalide.", "error")
-        return redirect(url_for("portefeuille"))
-
-    amount_cents = round(amount_euros * 100)
-    user = current_user()
-
-    try:
-        checkout_session = stripe.checkout.Session.create(
-            mode="payment",
-            payment_method_types=["card"],
-            line_items=[
-                {
-                    "price_data": {
-                        "currency": "eur",
-                        "product_data": {"name": "Recharge du portefeuille CoursConnect"},
-                        "unit_amount": amount_cents,
-                    },
-                    "quantity": 1,
-                }
-            ],
-            customer_email=user["email"],
-            client_reference_id=str(user["id"]),
-            metadata={"user_id": str(user["id"]), "amount_cents": str(amount_cents)},
-            success_url=url_for("portefeuille_succes", _external=True) + "?session_id={CHECKOUT_SESSION_ID}",
-            cancel_url=url_for("portefeuille_annule", _external=True),
-        )
-    except Exception as exc:
-        flash(f"Impossible de démarrer le paiement Stripe : {exc}", "error")
-        return redirect(url_for("portefeuille"))
-
-    return redirect(checkout_session.url, code=303)
-
-
-def credit_wallet_from_checkout_session(checkout_session):
-    """Crédite le portefeuille d'un élève à partir d'une Session Stripe Checkout
-    payée, en s'assurant de ne jamais la créditer deux fois (idempotence)."""
-    if checkout_session.get("payment_status") != "paid":
-        return False
-    db = get_db()
-    already = db.execute(
-        "SELECT id FROM wallet_transactions WHERE stripe_session_id = ?",
-        (checkout_session["id"],),
-    ).fetchone()
-    if already:
-        return False
-    user_id = int(checkout_session["metadata"]["user_id"])
-    amount_cents = int(checkout_session["metadata"]["amount_cents"])
-    credit_wallet(
-        db, user_id, amount_cents, "topup",
-        description="Recharge par carte bancaire (Stripe)",
-        stripe_session_id=checkout_session["id"],
-    )
-    db.commit()
-    return True
-
-
-@app.route("/portefeuille/succes")
-@login_required(role="etudiant")
-def portefeuille_succes():
-    session_id = request.args.get("session_id")
-    if session_id and STRIPE_SECRET_KEY:
-        try:
-            checkout_session = stripe.checkout.Session.retrieve(session_id)
-            if credit_wallet_from_checkout_session(checkout_session):
-                flash("Votre portefeuille a été rechargé avec succès !", "success")
-            else:
-                flash("Ce paiement a déjà été pris en compte.", "success")
-        except Exception as exc:
-            flash(f"Paiement reçu mais impossible de vérifier la session Stripe : {exc}", "error")
-    return redirect(url_for("portefeuille"))
-
-
-@app.route("/portefeuille/annule")
-@login_required(role="etudiant")
-def portefeuille_annule():
-    flash("Recharge annulée : aucun montant n'a été débité.", "error")
-    return redirect(url_for("portefeuille"))
-
-
-@app.route("/stripe/webhook", methods=["POST"])
-@csrf.exempt  # requête serveur-à-serveur de Stripe, authentifiée par signature (voir plus bas), pas par cookie
-def stripe_webhook():
-    """Point d'entrée webhook Stripe : filet de sécurité qui crédite le
-    portefeuille même si l'élève ferme son navigateur avant la redirection
-    vers /portefeuille/succes. À déclarer dans le Dashboard Stripe avec
-    l'événement 'checkout.session.completed'."""
-    # FAILLE CORRIGÉE : si STRIPE_WEBHOOK_SECRET n'était pas configuré, le
-    # code acceptait n'importe quel JSON envoyé sur cette route comme un
-    # évènement Stripe authentique, sans aucune vérification de signature.
-    # N'importe qui pouvait donc forger une requête "checkout.session.completed"
-    # et créditer le portefeuille de n'importe quel utilisateur à volonté.
-    # Le webhook est désormais refusé tant que le secret n'est pas configuré.
-    if not STRIPE_WEBHOOK_SECRET:
-        return jsonify({"error": "Webhook non configuré (STRIPE_WEBHOOK_SECRET manquant)."}), 503
-
-    payload = request.data
-    sig_header = request.headers.get("Stripe-Signature", "")
-    try:
-        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except (ValueError, stripe.error.SignatureVerificationError) as exc:
-        return jsonify({"error": str(exc)}), 400
-
-    if event["type"] == "checkout.session.completed":
-        checkout_session = event["data"]["object"]
-        with app.app_context():
-            credit_wallet_from_checkout_session(checkout_session)
-
-    return jsonify({"received": True})
-
-
-@app.route("/etudiant/paiement/<int:payment_id>/confirmer", methods=["POST"])
-@login_required(role="etudiant")
-def confirmer_paiement(payment_id):
-    db = get_db()
-    payment = db.execute(
-        "SELECT * FROM payments WHERE id = ? AND student_id = ? AND status = 'held'",
-        (payment_id, current_user()["id"]),
-    ).fetchone()
-    if not payment:
-        flash("Paiement introuvable ou déjà réglé.", "error")
-        return redirect(url_for("etudiant"))
-    release_payment(db, payment, reason="student")
-    db.commit()
-    flash("Merci ! Le professeur a été payé pour ce cours.", "success")
-    return redirect(request.referrer or url_for("etudiant"))
-
-
-@app.route("/etudiant/paiement/<int:payment_id>/rembourser", methods=["POST"])
-@login_required(role="etudiant")
-def rembourser_paiement(payment_id):
-    db = get_db()
-    payment = db.execute(
-        "SELECT * FROM payments WHERE id = ? AND student_id = ? AND status = 'held'",
-        (payment_id, current_user()["id"]),
-    ).fetchone()
-    if not payment:
-        flash("Paiement introuvable ou déjà réglé.", "error")
-        return redirect(url_for("etudiant"))
-    refund_payment(db, payment)
-    db.commit()
-    flash("Remboursement effectué sur votre portefeuille.", "success")
-    return redirect(request.referrer or url_for("etudiant"))
-
-
-@app.route("/facture/<int:slot_id>")
-@login_required()
-def telecharger_facture(slot_id):
-    """Facture PDF d'une séance passée et payée, téléchargeable par l'élève
-    qui a réservé le créneau ou par le professeur qui donne le cours."""
-    db = get_db()
-    user = current_user()
-
-    row = db.execute(
-        """
-        SELECT sl.*, c.teacher_id AS course_teacher_id
-        FROM slots sl
-        JOIN courses c ON c.id = sl.course_id
-        WHERE sl.id = ? AND EXISTS (SELECT 1 FROM payments p WHERE p.slot_id = sl.id)
-        """,
-        (slot_id,),
-    ).fetchone()
-
-    if not row:
-        flash("Aucune facture disponible pour cette séance (pas de paiement enregistré).", "error")
-        return redirect(request.referrer or url_for("index"))
-
-    is_student = user["id"] == row["reserved_by"]
-    is_teacher = user["id"] == row["course_teacher_id"]
-    if not (is_student or is_teacher):
-        abort(403)
-
-    # On ne délivre une facture qu'une fois la séance terminée.
-    if datetime.now() < slot_end_datetime(row):
-        flash("La facture sera disponible une fois la séance terminée.", "error")
-        return redirect(request.referrer or url_for("index"))
-
-    course = db.execute("SELECT * FROM courses WHERE id = ?", (row["course_id"],)).fetchone()
-    student = db.execute("SELECT * FROM users WHERE id = ?", (row["reserved_by"],)).fetchone()
-    teacher = db.execute("SELECT * FROM users WHERE id = ?", (row["course_teacher_id"],)).fetchone()
-    payment = db.execute("SELECT * FROM payments WHERE slot_id = ?", (slot_id,)).fetchone()
-
-    if not (student and teacher and payment):
-        flash("Aucune facture disponible pour cette séance.", "error")
-        return redirect(request.referrer or url_for("index"))
-
-    pdf_buffer = generate_invoice_pdf(payment, row, course, student, teacher)
-    return send_file(
-        pdf_buffer,
-        mimetype="application/pdf",
-        as_attachment=True,
-        download_name=f"facture-coursconnect-{payment['id']:06d}.pdf",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Routes — Authentification
-# ---------------------------------------------------------------------------
-MAX_PASSWORD_LENGTH = 128
-
-
-@app.route("/connexion", methods=["GET", "POST"])
-def connexion():
-    if request.method == "POST":
-        if is_rate_limited(f"login:{_client_ip()}", max_attempts=10, window_seconds=300):
-            flash("Trop de tentatives de connexion depuis cette adresse. Réessayez dans quelques minutes.", "error")
-            return render_template("connexion.html"), 429
-
-        email = request.form.get("email", "").strip().lower()
-        password = request.form.get("password", "")
-        user = get_db().execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-        if user and len(password) <= MAX_PASSWORD_LENGTH and check_password_hash(user["password_hash"], password):
-            session.clear()
-            session["user_id"] = user["id"]
-            session.permanent = True
-            flash(f"Bienvenue, {user['name']} !", "success")
-            return redirect(dashboard_url_for(user["role"]))
-        flash("E-mail ou mot de passe incorrect.", "error")
-    return render_template("connexion.html")
-
-
-DEMO_EMAILS = {
-    "prof": "camille@coursconnect.fr",
-    "etudiant": "lea@coursconnect.fr",
-}
-
-
-@app.route("/connexion/demo/<role>")
-def connexion_demo(role):
-    # FAILLE CORRIGÉE : cette route permettait à N'IMPORTE QUI de se
-    # connecter instantanément, sans mot de passe, sur les comptes de
-    # démonstration (prof et élève) — un contournement total de
-    # l'authentification. Elle n'est désormais active que si la variable
-    # d'environnement ENABLE_DEMO_LOGIN=1 est explicitement définie
-    # (utile en démo/formation, à ne jamais activer en production).
-    if os.environ.get("ENABLE_DEMO_LOGIN", "0") != "1":
-        flash("La connexion de démonstration n'est pas activée sur ce serveur.", "error")
-        return redirect(url_for("connexion"))
-
-    email = DEMO_EMAILS.get(role)
-    user = get_db().execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone() if email else None
-    if user:
-        session.clear()
-        session["user_id"] = user["id"]
-        session.permanent = True
-        flash(f"Connecté(e) en tant que {user['name']}.", "success")
-        return redirect(dashboard_url_for(user["role"]))
-    return redirect(url_for("connexion"))
-
-
-@app.route("/uploads/profils/<filename>")
-def uploaded_profile(filename):
-    return send_from_directory(PROFILE_PHOTOS_DIR, filename)
-
-
-@app.route("/uploads/messagerie/<int:message_id>/<filename>")
-@login_required()
-def uploaded_message_attachment(message_id, filename):
-    """Sert une pièce jointe de messagerie, réservée à l'expéditeur, au
-    destinataire du message, ou à l'administrateur (supervision)."""
-    user = current_user()
-    db = get_db()
-    message = db.execute(
-        "SELECT * FROM messages WHERE id = ? AND attachment_filename = ?",
-        (message_id, filename),
-    ).fetchone()
-    if not message:
-        return "Fichier introuvable.", 404
-    if user["id"] not in (message["sender_id"], message["recipient_id"]) and user["role"] != "admin":
-        return "Accès refusé.", 403
-    return send_from_directory(
-        MESSAGE_ATTACHMENTS_DIR,
-        message["attachment_filename"],
-        download_name=message["attachment_original_name"] or message["attachment_filename"],
-    )
-
-
-@app.route("/inscription", methods=["GET", "POST"])
-def inscription():
-    registration_mode = get_registration_mode()
-
-    if request.method == "POST":
-        if is_rate_limited(f"signup:{_client_ip()}", max_attempts=8, window_seconds=3600):
-            flash("Trop de tentatives d'inscription depuis cette adresse. Réessayez plus tard.", "error")
-            return render_template("inscription.html", registration_mode=registration_mode), 429
-
-        name = request.form.get("name", "").strip()
-        email = request.form.get("email", "").strip().lower()
-        password = request.form.get("password", "")
-        role = request.form.get("role")
-
-        if role not in ("prof", "etudiant"):
-            flash("Merci de choisir un rôle valide.", "error")
-            return render_template("inscription.html", registration_mode=registration_mode)
-
-        if registration_mode == "profs" and role == "etudiant":
-            flash("Les inscriptions sont actuellement réservées aux professeurs.", "error")
-            return render_template("inscription.html", registration_mode=registration_mode)
-
-        email_valid = bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email))
-        if not name or not email_valid or not (8 <= len(password) <= MAX_PASSWORD_LENGTH):
-            flash(
-                "Merci de renseigner un nom, une adresse e-mail valide et un mot de passe "
-                f"entre 8 et {MAX_PASSWORD_LENGTH} caractères.",
-                "error",
-            )
-            return render_template("inscription.html", registration_mode=registration_mode)
-
-        db = get_db()
-        if db.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone():
-            flash("Un compte existe déjà avec cet e-mail.", "error")
-            return render_template("inscription.html", registration_mode=registration_mode)
-
-        # Un professeur qui s'inscrit doit être validé par l'administrateur
-        # avant que son profil et ses cours n'apparaissent publiquement.
-        approved = 0 if role == "prof" else 1
-
-        cur = db.execute(
-            "INSERT INTO users(name, email, password_hash, role, approved) VALUES (?, ?, ?, ?, ?)",
-            (name, email, generate_password_hash(password), role, approved),
-        )
-        db.commit()
-        session.clear()
-        session["user_id"] = cur.lastrowid
-        session.permanent = True
-        if role == "prof":
-            flash(
-                f"Compte créé, bienvenue {name} ! Votre profil est en attente de validation par "
-                "l'administrateur : il ne sera visible publiquement qu'une fois validé.",
-                "success",
-            )
-        else:
-            flash(f"Compte créé. Bienvenue, {name} !", "success")
-        return redirect(dashboard_url_for(role))
-    return render_template("inscription.html", registration_mode=registration_mode)
-
-
-@app.route("/deconnexion")
-def deconnexion():
-    session.clear()
-    flash("Vous êtes déconnecté(e).", "success")
-    return redirect(url_for("presentation"))
-
-
-# ---------------------------------------------------------------------------
-# Routes — Professeur
-# ---------------------------------------------------------------------------
-@app.route("/prof/tableau-de-bord")
-@login_required(role="prof")
-def prof_dashboard():
-    db = get_db()
-    user = current_user()
-    rows = db.execute(
-        "SELECT * FROM courses WHERE teacher_id = ? ORDER BY id DESC",
-        (user["id"],),
-    ).fetchall()
-    slots_map = get_slots_map(db, [r["id"] for r in rows])
-    reserved_count = sum(1 for slots in slots_map.values() for s in slots if s["reserved_by"])
-    # Le prof ne voit que sa moyenne et le nombre de notes reçues, jamais le
-    # détail des notes individuelles laissées par ses élèves.
-    my_rating = get_teacher_ratings_map(db, [user["id"]]).get(user["id"])
-    pending_cents = db.execute(
-        "SELECT COALESCE(SUM(amount_cents), 0) FROM payments WHERE teacher_id = ? AND status = 'held'",
-        (user["id"],),
-    ).fetchone()[0]
-    return render_template(
-        "prof_dashboard.html",
-        courses=rows,
-        reserved_count=reserved_count,
-        slots_map=slots_map,
-        my_rating=my_rating,
-        pending_cents=pending_cents,
-    )
-
-
-def allowed_photo(filename):
-    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_PHOTO_EXTENSIONS
-
-
-def save_message_attachment(file_storage):
-    """Valide et enregistre une pièce jointe de messagerie (image ou PDF).
-
-    Retourne un tuple (filename, original_name, attachment_type) ou lève une
-    ValueError avec un message d'erreur destiné à l'utilisateur si le fichier
-    n'est pas autorisé.
-    """
-    filename = file_storage.filename or ""
-    if "." not in filename:
-        raise ValueError("Format de fichier non reconnu.")
-    ext = filename.rsplit(".", 1)[1].lower()
-    if ext not in ALLOWED_MESSAGE_EXTENSIONS:
-        raise ValueError("Seules les images (PNG, JPG, WEBP, GIF) et les PDF sont autorisés en pièce jointe.")
-
-    # Vérifie la taille réelle du fichier (au-delà de la limite globale Flask,
-    # qui coupe la requête entière plutôt que de renvoyer un message clair).
-    file_storage.stream.seek(0, os.SEEK_END)
-    size = file_storage.stream.tell()
-    file_storage.stream.seek(0)
-    if size > MAX_MESSAGE_ATTACHMENT_SIZE:
-        raise ValueError("Le fichier dépasse la taille maximale autorisée (8 Mo).")
-
-    attachment_type = "image" if ext in ALLOWED_MESSAGE_IMAGE_EXTENSIONS else "pdf"
-    stored_filename = f"{secrets.token_hex(16)}.{ext}"
-    os.makedirs(MESSAGE_ATTACHMENTS_DIR, exist_ok=True)
-    file_storage.save(os.path.join(MESSAGE_ATTACHMENTS_DIR, stored_filename))
-    return stored_filename, filename, attachment_type
-
-
-@app.route("/prof/profil", methods=["GET", "POST"])
-@login_required(role="prof")
-def prof_profil():
-    db = get_db()
-    user = current_user()
-
-    if request.method == "POST":
-        bio = request.form.get("bio", "").strip()
-        education_level = request.form.get("education_level", "").strip()
-        photo_file = request.files.get("photo")
-        photo_filename = user["photo"]
-
-        if photo_file and photo_file.filename:
-            if not allowed_photo(photo_file.filename):
-                flash("Format d'image non pris en charge (utilisez JPG, PNG ou WEBP).", "error")
-                return render_template("prof_profil.html", user=user, niveaux_etude=NIVEAUX_ETUDE_PROF)
-            ext = photo_file.filename.rsplit(".", 1)[1].lower()
-            new_filename = f"prof-{user['id']}.{ext}"
-            os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
-            photo_file.save(os.path.join(PROFILE_PHOTOS_DIR, new_filename))
-            photo_filename = new_filename
-
-        db.execute(
-            "UPDATE users SET bio = ?, photo = ?, education_level = ? WHERE id = ?",
-            (bio or None, photo_filename, education_level or None, user["id"]),
-        )
-        db.commit()
-        flash("Profil mis à jour.", "success")
-        return redirect(url_for("prof_profil"))
-
-    return render_template("prof_profil.html", user=user, niveaux_etude=NIVEAUX_ETUDE_PROF)
-
-
-@app.route("/prof/creer", methods=["GET", "POST"])
-@login_required(role="prof")
-def prof_creer():
-    if not current_user()["approved"]:
-        flash(
-            "Votre compte est en attente de validation par l'administrateur : vous pourrez "
-            "publier des cours une fois votre profil validé.",
-            "error",
-        )
-        return redirect(url_for("prof_dashboard"))
-
-    if request.method == "POST":
-        title = request.form.get("title", "").strip()
-        subjects = request.form.getlist("subject")
-        levels = request.form.getlist("level")
-        description = request.form.get("description", "").strip()
-        mode = request.form.get("mode", "")
-        city = request.form.get("city", "").strip()
-        price_raw = request.form.get("price", "").strip().replace(",", ".")
-
-        slot_dates = request.form.getlist("slot_date[]")
-        slot_times = request.form.getlist("slot_time[]")
-        slot_durations = request.form.getlist("slot_duration[]")
-
-        errors = []
-        if not title:
-            errors.append("Merci de renseigner un titre.")
-        if not subjects or any(subject not in MATIERES for subject in subjects):
-            errors.append("Merci de choisir au moins une matière dans la liste proposée.")
-        if not levels or any(level not in NIVEAUX for level in levels):
-            errors.append("Merci de choisir au moins un niveau scolaire dans la liste proposée.")
-        if not description:
-            errors.append("Merci de renseigner une description.")
-        if mode not in MODES:
-            errors.append("Merci de choisir si le cours a lieu en ligne, en présentiel, ou les deux.")
-        if mode in ("presentiel", "les_deux") and not city:
-            errors.append("Merci de renseigner la ville où le cours a lieu en présentiel.")
-        if mode == "en_ligne":
-            city = ""
-
-        price_cents = None
-        try:
-            price_value = float(price_raw)
-            if price_value < 0:
-                raise ValueError
-            price_cents = round(price_value * 100)
-        except (TypeError, ValueError):
-            errors.append("Merci d'indiquer un prix par séance valide (ex. 25 ou 25,50).")
-
-        slots = []
-        for date_val, time_val, duration_val in zip(slot_dates, slot_times, slot_durations):
-            date_val = date_val.strip()
-            time_val = time_val.strip()
-            if not date_val and not time_val and not duration_val.strip():
-                continue  # ligne de créneau laissée vide, on l'ignore
-            if not date_val or not time_val:
-                errors.append("Chaque créneau doit avoir une date et une heure.")
-                continue
-            try:
-                duration = int(duration_val)
-                if duration <= 0:
-                    raise ValueError
-            except (TypeError, ValueError):
-                errors.append("La durée de chaque créneau doit être un nombre de minutes positif.")
-                continue
-            slots.append((date_val, time_val, duration))
-
-        if not slots:
-            errors.append("Ajoutez au moins un créneau (date, heure et durée) pour ce cours.")
-
-        if errors:
-            for e in errors:
-                flash(e, "error")
-            return render_template(
-                "prof_creer.html",
-                matieres=MATIERES,
-                niveaux=NIVEAUX,
-                modes=MODES,
-                mode_labels=MODE_LABELS,
-                selected_subjects=subjects,
-                selected_levels=levels,
-                form=request.form,
-            )
-
-        db = get_db()
-        cur = db.execute(
-            "INSERT INTO courses(title, subject, level, description, teacher_id, mode, city, price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (title, ", ".join(subjects), ", ".join(levels), description, current_user()["id"], mode, city or None, price_cents),
-        )
-        course_id = cur.lastrowid
-        for date_val, time_val, duration in slots:
-            db.execute(
-                "INSERT INTO slots(course_id, slot_date, slot_time, duration_minutes) VALUES (?, ?, ?, ?)",
-                (course_id, date_val, time_val, duration),
-            )
-        db.commit()
-        flash(f"Cours publié : {title}", "success")
-        return redirect(url_for("prof_dashboard"))
-
-    return render_template(
-        "prof_creer.html", matieres=MATIERES, niveaux=NIVEAUX, modes=MODES,
-        mode_labels=MODE_LABELS, selected_subjects=[], selected_levels=[], form={}
-    )
-
-
-@app.route("/prof/cours/<int:course_id>/supprimer", methods=["POST"])
-@login_required(role="prof")
-def prof_supprimer(course_id):
-    db = get_db()
-    course = db.execute(
-        "SELECT * FROM courses WHERE id = ? AND teacher_id = ?",
-        (course_id, current_user()["id"]),
-    ).fetchone()
-    if not course:
-        flash("Cours introuvable.", "error")
-        return redirect(url_for("prof_dashboard"))
-
-    slots = db.execute("SELECT * FROM slots WHERE course_id = ?", (course_id,)).fetchall()
-
-    # Un professeur ne peut pas annuler une séance déjà réservée dans les 12h
-    # précédant son début : on bloque la suppression du cours tant qu'un de
-    # ses créneaux réservés est dans ce cas.
-    non_cancellable = [s for s in slots if s["reserved_by"] and not slot_is_cancellable(s)]
-    if non_cancellable:
-        flash(
-            "Impossible de supprimer ce cours : au moins un créneau réservé "
-            "commence dans moins de 12h et ne peut plus être annulé.",
-            "error",
-        )
-        return redirect(url_for("prof_dashboard"))
-
-    # Les créneaux réservés et déjà payés (paiement en séquestre) qui sont
-    # annulés ici doivent être remboursés à l'élève, comme pour une
-    # désinscription classique.
-    for slot in slots:
-        if slot["reserved_by"]:
-            payment = db.execute(
-                "SELECT * FROM payments WHERE slot_id = ? AND status = 'held'", (slot["id"],)
-            ).fetchone()
-            if payment:
-                refund_payment(db, payment)
-
-    db.execute("DELETE FROM courses WHERE id = ? AND teacher_id = ?", (course_id, current_user()["id"]))
-    db.commit()
-    flash("Cours supprimé.", "success")
-    return redirect(url_for("prof_dashboard"))
-
-
-# ---------------------------------------------------------------------------
-# Routes — Administration
-# ---------------------------------------------------------------------------
-@app.route("/admin/tableau-de-bord")
-@login_required(role="admin")
-def admin_dashboard():
-    db = get_db()
-    profs = db.execute(
-        """
-        SELECT u.*, (SELECT COUNT(*) FROM courses c WHERE c.teacher_id = u.id) AS course_count
-        FROM users u WHERE u.role = 'prof' AND u.approved = 1 ORDER BY u.name
-        """
-    ).fetchall()
-    profs_en_attente = db.execute(
-        """
-        SELECT u.*, (SELECT COUNT(*) FROM courses c WHERE c.teacher_id = u.id) AS course_count
-        FROM users u WHERE u.role = 'prof' AND u.approved = 0 ORDER BY u.name
-        """
-    ).fetchall()
-    etudiants = db.execute(
-        """
-        SELECT u.*, (SELECT COUNT(*) FROM slots sl WHERE sl.reserved_by = u.id) AS course_count
-        FROM users u WHERE u.role = 'etudiant' ORDER BY u.name
-        """
-    ).fetchall()
-    courses_rows = db.execute(
-        """
-        SELECT c.*, u.name AS teacher_name
-        FROM courses c
-        JOIN users u ON u.id = c.teacher_id
-        ORDER BY c.id DESC
-        """
-    ).fetchall()
-
-    admin_id = get_admin_id()
-    commission_total_cents = db.execute(
-        "SELECT COALESCE(SUM(commission_cents), 0) FROM payments WHERE status = 'released'"
-    ).fetchone()[0]
-    admin_wallet_cents = db.execute(
-        "SELECT wallet_cents FROM users WHERE id = ?", (admin_id,)
-    ).fetchone()[0] if admin_id else 0
-
-    pending_withdrawals_count = db.execute(
-        "SELECT COUNT(*) FROM withdrawals WHERE status = 'pending'"
-    ).fetchone()[0]
-
-    return render_template(
-        "admin_dashboard.html",
-        profs=profs,
-        profs_en_attente=profs_en_attente,
-        etudiants=etudiants,
-        courses=courses_rows,
-        slots_map=get_slots_map(db, [c["id"] for c in courses_rows]),
-        registration_mode=get_registration_mode(),
-        admin_commission_rate=ADMIN_COMMISSION_RATE,
-        commission_total_cents=commission_total_cents,
-        admin_wallet_cents=admin_wallet_cents,
-        pending_withdrawals_count=pending_withdrawals_count,
-    )
-
-
-@app.route("/admin/retraits")
-@login_required(role="admin")
-def admin_retraits():
-    db = get_db()
-    demandes = db.execute(
-        """
-        SELECT w.*, u.name AS user_name, u.email AS user_email, u.role AS user_role
-        FROM withdrawals w
-        JOIN users u ON u.id = w.user_id
-        ORDER BY (w.status = 'pending') DESC, w.id DESC
-        """
-    ).fetchall()
-    pending_count = sum(1 for d in demandes if d["status"] == "pending")
-    return render_template(
-        "admin_retraits.html",
-        demandes=demandes,
-        pending_count=pending_count,
-        withdrawal_methods=WITHDRAWAL_METHODS,
-    )
-
-
-@app.route("/admin/retraits/<int:withdrawal_id>/payer", methods=["POST"])
-@login_required(role="admin")
-def admin_retrait_payer(withdrawal_id):
-    db = get_db()
-    demande = db.execute("SELECT * FROM withdrawals WHERE id = ?", (withdrawal_id,)).fetchone()
-    if not demande:
-        flash("Demande de retrait introuvable.", "error")
-        return redirect(url_for("admin_retraits"))
-    if demande["status"] != "pending":
-        flash("Cette demande a déjà été traitée.", "error")
-        return redirect(url_for("admin_retraits"))
-
-    db.execute(
-        "UPDATE withdrawals SET status = 'paid', resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
-        (withdrawal_id,),
-    )
-    db.commit()
-    flash("Retrait marqué comme payé.", "success")
-    return redirect(url_for("admin_retraits"))
-
-
-@app.route("/admin/retraits/<int:withdrawal_id>/refuser", methods=["POST"])
-@login_required(role="admin")
-def admin_retrait_refuser(withdrawal_id):
-    db = get_db()
-    demande = db.execute("SELECT * FROM withdrawals WHERE id = ?", (withdrawal_id,)).fetchone()
-    if not demande:
-        flash("Demande de retrait introuvable.", "error")
-        return redirect(url_for("admin_retraits"))
-    if demande["status"] != "pending":
-        flash("Cette demande a déjà été traitée.", "error")
-        return redirect(url_for("admin_retraits"))
-
-    note = request.form.get("admin_note", "").strip() or None
-    # Le montant retiré est recrédité au demandeur.
-    credit_wallet(
-        db, demande["user_id"], demande["amount_cents"], "refund",
-        description="Retrait refusé : montant recrédité sur le portefeuille",
-    )
-    db.execute(
-        "UPDATE withdrawals SET status = 'rejected', admin_note = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
-        (note, withdrawal_id),
-    )
-    db.commit()
-    flash("Retrait refusé, le montant a été recrédité à l'utilisateur.", "success")
-    return redirect(url_for("admin_retraits"))
-
-
-@app.route("/admin/parametres/inscriptions", methods=["POST"])
-@login_required(role="admin")
-def admin_definir_mode_inscription():
-    mode = request.form.get("registration_mode")
-    if mode not in ("tous", "profs"):
-        flash("Mode d'inscription invalide.", "error")
-        return redirect(url_for("admin_dashboard"))
-    set_registration_mode(mode)
-    if mode == "profs":
-        flash("Les inscriptions sont désormais réservées aux professeurs.", "success")
-    else:
-        flash("Les inscriptions sont désormais ouvertes à tous (professeurs et élèves).", "success")
-    return redirect(url_for("admin_dashboard"))
-
-
-@app.route("/admin/utilisateurs/<int:user_id>/valider", methods=["POST"])
-@login_required(role="admin")
-def admin_valider_prof(user_id):
-    """Valide l'inscription d'un professeur : son profil et ses cours
-    deviennent alors visibles publiquement."""
-    db = get_db()
-    target = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if not target or target["role"] != "prof":
-        flash("Professeur introuvable.", "error")
-        return redirect(url_for("admin_dashboard"))
-
-    db.execute("UPDATE users SET approved = 1 WHERE id = ?", (user_id,))
-    db.commit()
-    flash(f"Le profil de {target['name']} est validé et désormais visible publiquement.", "success")
-    return redirect(url_for("admin_dashboard"))
-
-
-@app.route("/admin/utilisateurs/<int:user_id>/supprimer", methods=["POST"])
-@login_required(role="admin")
-def admin_supprimer_utilisateur(user_id):
-    if user_id == current_user()["id"]:
-        flash("Vous ne pouvez pas supprimer votre propre compte administrateur.", "error")
-        return redirect(url_for("admin_dashboard"))
-
-    db = get_db()
-    target = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if not target:
-        flash("Utilisateur introuvable.", "error")
-        return redirect(url_for("admin_dashboard"))
-    if target["role"] == "admin":
-        flash("Impossible de supprimer un autre compte administrateur.", "error")
-        return redirect(url_for("admin_dashboard"))
-
-    # Grâce à ON DELETE CASCADE, ses cours (si prof) et ses inscriptions
-    # (si étudiant) sont automatiquement supprimés avec lui.
-    db.execute("DELETE FROM users WHERE id = ?", (user_id,))
-    db.commit()
-    flash(f"Le compte de {target['name']} a été supprimé.", "success")
-    return redirect(url_for("admin_dashboard"))
-
-
-@app.route("/admin/cours/<int:course_id>/supprimer", methods=["POST"])
-@login_required(role="admin")
-def admin_supprimer_cours(course_id):
-    db = get_db()
-    course = db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone()
-    if not course:
-        flash("Cours introuvable.", "error")
-        return redirect(url_for("admin_dashboard"))
-    db.execute("DELETE FROM courses WHERE id = ?", (course_id,))
-    db.commit()
-    flash(f"Le cours « {course['title']} » a été supprimé.", "success")
-    return redirect(url_for("admin_dashboard"))
-
-
-@app.route("/admin/messagerie")
-@login_required(role="admin")
-def admin_messagerie():
-    db = get_db()
-    conversations = db.execute(
-        """
-        SELECT ct.student_id, ct.teacher_id,
-               s.name AS student_name, t.name AS teacher_name,
-               (
-                   SELECT COUNT(*) FROM messages m
-                   WHERE (m.sender_id = ct.student_id AND m.recipient_id = ct.teacher_id)
-                      OR (m.sender_id = ct.teacher_id AND m.recipient_id = ct.student_id)
-               ) AS message_count,
-               (
-                   SELECT MAX(m.created_at) FROM messages m
-                   WHERE (m.sender_id = ct.student_id AND m.recipient_id = ct.teacher_id)
-                      OR (m.sender_id = ct.teacher_id AND m.recipient_id = ct.student_id)
-               ) AS last_at,
-               (
-                   SELECT m.body FROM messages m
-                   WHERE (m.sender_id = ct.student_id AND m.recipient_id = ct.teacher_id)
-                      OR (m.sender_id = ct.teacher_id AND m.recipient_id = ct.student_id)
-                   ORDER BY m.id DESC LIMIT 1
-               ) AS last_body
-        FROM contacts ct
-        JOIN users s ON s.id = ct.student_id
-        JOIN users t ON t.id = ct.teacher_id
-        GROUP BY ct.student_id, ct.teacher_id
-        ORDER BY last_at IS NULL, last_at DESC
-        """
-    ).fetchall()
-    return render_template("admin_messagerie.html", conversations=conversations)
-
-
-@app.route("/admin/messagerie/<int:student_id>/<int:teacher_id>")
-@login_required(role="admin")
-def admin_messagerie_thread(student_id, teacher_id):
-    db = get_db()
-    contact = db.execute(
-        "SELECT * FROM contacts WHERE student_id = ? AND teacher_id = ?",
-        (student_id, teacher_id),
-    ).fetchone()
-    if not contact:
-        flash("Cette conversation n'existe pas.", "error")
-        return redirect(url_for("admin_messagerie"))
-
-    student = db.execute("SELECT * FROM users WHERE id = ?", (student_id,)).fetchone()
-    teacher = db.execute("SELECT * FROM users WHERE id = ?", (teacher_id,)).fetchone()
-    thread = db.execute(
-        """
-        SELECT * FROM messages
-        WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
-        ORDER BY id ASC
-        """,
-        (student_id, teacher_id, teacher_id, student_id),
-    ).fetchall()
-    return render_template(
-        "admin_messagerie_thread.html", student=student, teacher=teacher, thread=thread
-    )
-
-
-# ---------------------------------------------------------------------------
-# Routes — Étudiant
-# ---------------------------------------------------------------------------
-@app.route("/etudiant/profil", methods=["GET", "POST"])
-@login_required(role="etudiant")
-def etudiant_profil():
-    db = get_db()
-    user = current_user()
-
-    if request.method == "POST":
-        bio = request.form.get("bio", "").strip()
-        classe = request.form.get("education_level", "").strip()
-        photo_file = request.files.get("photo")
-        photo_filename = user["photo"]
-
-        if photo_file and photo_file.filename:
-            if not allowed_photo(photo_file.filename):
-                flash("Format d'image non pris en charge (utilisez JPG, PNG ou WEBP).", "error")
-                return render_template("etudiant_profil.html", user=user, niveaux=NIVEAUX)
-            ext = photo_file.filename.rsplit(".", 1)[1].lower()
-            new_filename = f"etudiant-{user['id']}.{ext}"
-            os.makedirs(PROFILE_PHOTOS_DIR, exist_ok=True)
-            photo_file.save(os.path.join(PROFILE_PHOTOS_DIR, new_filename))
-            photo_filename = new_filename
-
-        db.execute(
-            "UPDATE users SET bio = ?, photo = ?, education_level = ? WHERE id = ?",
-            (bio or None, photo_filename, classe or None, user["id"]),
-        )
-        db.commit()
-        flash("Profil mis à jour.", "success")
-        return redirect(url_for("etudiant_profil"))
-
-    return render_template("etudiant_profil.html", user=user, niveaux=NIVEAUX)
-
-
-@app.route("/etudiant/mes-cours")
-@login_required(role="etudiant")
-def etudiant():
-    db = get_db()
-    reservations = db.execute(
-        """
-        SELECT sl.*, c.id AS course_id, c.title, c.subject, c.level, c.description,
-               c.teacher_id, c.city AS course_city, c.price_cents, u.name AS teacher_name,
-               p.id AS payment_id, p.status AS payment_status, p.amount_cents AS payment_amount_cents,
-               p.release_at AS payment_release_at
-        FROM slots sl
-        JOIN courses c ON c.id = sl.course_id
-        JOIN users u ON u.id = c.teacher_id
-        LEFT JOIN payments p ON p.slot_id = sl.id
-        WHERE sl.reserved_by = ?
-        ORDER BY sl.slot_date, sl.slot_time
-        """,
-        (current_user()["id"],),
-    ).fetchall()
-    my_ratings = {
-        r["teacher_id"]: r["rating"]
-        for r in db.execute(
-            "SELECT teacher_id, rating FROM ratings WHERE student_id = ?",
-            (current_user()["id"],),
-        ).fetchall()
-    }
-    now = datetime.now()
-    course_over_map = {}
-    for r in reservations:
-        try:
-            course_over_map[r["id"]] = slot_end_datetime(r) <= now
-        except (TypeError, ValueError):
-            course_over_map[r["id"]] = False
-    return render_template(
-        "etudiant.html",
-        reservations=reservations,
-        my_ratings=my_ratings,
-        course_over_map=course_over_map,
-    )
-
-
-@app.route("/profs/<int:teacher_id>/noter", methods=["POST"])
-@login_required(role="etudiant")
-def noter_prof(teacher_id):
-    user = current_user()
-    db = get_db()
-    teacher = db.execute(
-        "SELECT * FROM users WHERE id = ? AND role = 'prof'", (teacher_id,)
-    ).fetchone()
-    if not teacher:
-        flash("Professeur introuvable.", "error")
-        return redirect(url_for("etudiant"))
-
-    # On ne peut noter qu'un prof avec qui un cours a déjà été réservé.
-    if not is_allowed_contact(user, teacher_id):
-        flash("Vous ne pouvez noter qu'un professeur avec qui vous avez réservé un cours.", "error")
-        return redirect(url_for("etudiant"))
-
-    try:
-        rating = int(request.form.get("rating", ""))
-    except (TypeError, ValueError):
-        rating = 0
-    if rating < 1 or rating > 5:
-        flash("Merci de choisir une note entre 1 et 5 étoiles.", "error")
-        return redirect(url_for("etudiant"))
-
-    db.execute(
-        """
-        INSERT INTO ratings(student_id, teacher_id, rating)
-        VALUES (?, ?, ?)
-        ON CONFLICT(student_id, teacher_id)
-        DO UPDATE SET rating = excluded.rating, created_at = CURRENT_TIMESTAMP
-        """,
-        (user["id"], teacher_id, rating),
-    )
-    db.commit()
-    flash(f"Vous avez noté {teacher['name']} {rating}/5. Merci !", "success")
-    return redirect(url_for("etudiant"))
-
-
-# ---------------------------------------------------------------------------
-# Routes — Calendrier
-# ---------------------------------------------------------------------------
 def resolve_month(args):
-    today = date.today()
+    today = now_local().date()
     try:
         year = int(args.get("year", today.year))
         month = int(args.get("month", today.month))
-        if month < 1 or month > 12:
+        if not (1 <= month <= 12 and today.year - 5 <= year <= today.year + 5):
             raise ValueError
     except (TypeError, ValueError):
         year, month = today.year, today.month
@@ -2620,9 +2115,1026 @@ def resolve_month(args):
 
 
 def month_nav(year, month):
-    prev_month, prev_year = (12, year - 1) if month == 1 else (month - 1, year)
-    next_month, next_year = (1, year + 1) if month == 12 else (month + 1, year)
-    return (prev_year, prev_month), (next_year, next_month)
+    prev = (year - 1, 12) if month == 1 else (year, month - 1)
+    nxt = (year + 1, 1) if month == 12 else (year, month + 1)
+    return prev, nxt
+
+
+def build_month_weeks(year, month, events_by_date):
+    today = now_local().date()
+    weeks = []
+    for week in calendar_mod.Calendar(firstweekday=0).monthdatescalendar(year, month):
+        weeks.append([
+            {"date": day, "in_month": day.month == month, "is_today": day == today,
+             "events": sorted(events_by_date.get(day.isoformat(), []), key=lambda e: e["time"])}
+            for day in week
+        ])
+    return weeks
+
+
+@app.route("/cours/calendrier")
+def cours_calendrier():
+    db = get_db()
+    filters = parse_course_filters(request.args)
+    year, month = resolve_month(request.args)
+    (py, pm), (ny, nm) = month_nav(year, month)
+    courses = fetch_filtered_courses(db, filters)
+    slots_map = get_slots_map(db, [c["id"] for c in courses])
+    now = now_local()
+    events = {}
+    for c in courses:
+        for s in slots_map.get(c["id"], []):
+            if s["reserved_by"] is None and safe_slot_start(s) > now:
+                events.setdefault(s["slot_date"], []).append({
+                    "title": c["title"], "subtitle": f"{c['subject']} · {c['level']} · {c['teacher_name']}",
+                    "time": s["slot_time"], "duration": s["duration_minutes"], "status": "disponible",
+                    "course_id": c["id"],
+                })
+    nav = {k: v for k, v in filters.items() if v}
+    return render_template(
+        "cours_calendrier.html",
+        weeks=build_month_weeks(year, month, events),
+        month_label=f"{MOIS_FR_CAP[month]} {year}",
+        jours=JOURS_COURTS,
+        prev_link=url_for("cours_calendrier", year=py, month=pm, **nav),
+        next_link=url_for("cours_calendrier", year=ny, month=nm, **nav),
+        today_link=url_for("cours_calendrier", **nav),
+        matieres=MATIERES, niveaux=NIVEAUX, teachers=approved_teachers(db),
+        filters=filters, courses_count=len(courses),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Réservation et paiement
+# ---------------------------------------------------------------------------
+@app.route("/cours/<int:course_id>/reserver", methods=["POST"])
+@login_required(role="etudiant")
+def reserver(course_id):
+    db = get_db()
+    student = current_user()
+    back = redirect(url_for("cours") + f"#cours-{course_id}")
+    if is_rate_limited(f"booking:{student['id']}", 10, 600):
+        flash("Trop de tentatives de réservation. Patientez quelques minutes.", "error")
+        return back
+
+    course = db.execute(
+        """
+        SELECT c.*, u.name AS teacher_name, u.approved, u.deleted_at, u.teacher_status, u.siret,
+               u.stripe_account_id, u.stripe_charges_enabled
+        FROM courses c JOIN users u ON u.id = c.teacher_id WHERE c.id = ?
+        """,
+        (course_id,),
+    ).fetchone()
+    if not course or not course["approved"] or course["deleted_at"]:
+        flash("Ce cours n'est pas disponible.", "error")
+        return redirect(url_for("cours"))
+
+    slot_ids = []
+    for raw in request.form.getlist("slot_id[]"):
+        if raw.isdigit() and int(raw) not in slot_ids:
+            slot_ids.append(int(raw))
+    if not slot_ids:
+        flash("Sélectionnez au moins un créneau.", "error")
+        return back
+    if len(slot_ids) > MAX_SLOTS_PER_BOOKING:
+        flash(f"Vous pouvez réserver au maximum {MAX_SLOTS_PER_BOOKING} créneaux à la fois.", "error")
+        return back
+    if not request.form.get("accept_cgv"):
+        flash("Vous devez accepter les conditions générales de vente pour réserver.", "error")
+        return back
+
+    price = int(course["price_cents"] or 0)
+    is_free = price == 0
+    teacher_is_pro = course["teacher_status"] in PRO_STATUSES
+    if not is_free:
+        if not STRIPE_SECRET_KEY or not (course["stripe_account_id"] and course["stripe_charges_enabled"]):
+            flash("Le paiement en ligne n'est pas encore disponible pour ce professeur.", "error")
+            return back
+        if teacher_is_pro and not request.form.get("waiver"):
+            flash("Cochez la case relative au droit de rétractation pour confirmer la réservation.", "error")
+            return back
+
+    notes = form_value("notes", "notes", multiline=True) or None
+    now = now_local()
+    pending_until = (utc_now() + CHECKOUT_TTL + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    reserved = []
+    for slot_id in slot_ids:
+        slot = db.execute("SELECT * FROM slots WHERE id = ? AND course_id = ?", (slot_id, course_id)).fetchone()
+        if not slot or safe_slot_start(slot) < now + BOOKING_MIN_NOTICE:
+            continue
+        if course["mode"] == "les_deux":
+            chosen = request.form.get(f"slot_mode_{slot_id}", "")
+            mode = chosen if chosen in ("en_ligne", "presentiel") else "en_ligne"
+        else:
+            mode = course["mode"]
+        if db.execute(
+            "UPDATE slots SET reserved_by = ?, student_notes = ?, slot_mode = ?, reservation_status = ?, "
+            "pending_until = ?, reserved_at = CURRENT_TIMESTAMP WHERE id = ? AND course_id = ? AND reserved_by IS NULL",
+            (student["id"], notes, mode, "confirmed" if is_free else "pending",
+             None if is_free else pending_until, slot_id, course_id),
+        ).rowcount:
+            reserved.append((slot, mode))
+    if not reserved:
+        db.rollback()
+        flash("Ces créneaux ne sont plus disponibles (déjà réservés, ou trop proches de l'heure actuelle).", "error")
+        return back
+
+    fee = 0 if is_free else platform_fee(price)
+    cur = db.execute(
+        """
+        INSERT INTO orders(student_id, teacher_id, course_id, course_title, student_name, student_email,
+                           teacher_name, teacher_status, teacher_siret, amount_cents, platform_fee_cents, status,
+                           stripe_account_id, waiver_accepted_at, terms_version, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+        """,
+        (student["id"], course["teacher_id"], course_id, course["title"], student["name"], student["email"],
+         course["teacher_name"], course["teacher_status"] or "particulier",
+         course["siret"] if teacher_is_pro else None, price * len(reserved), fee * len(reserved),
+         course["stripe_account_id"], utc_now_str() if request.form.get("waiver") else None, TERMS_VERSION,
+         None if is_free else (utc_now() + CHECKOUT_TTL).strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    order_id = cur.lastrowid
+    for slot, mode in reserved:
+        db.execute(
+            "INSERT INTO order_items(order_id, slot_id, slot_date, slot_time, duration_minutes, slot_mode, amount_cents, platform_fee_cents, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+            (order_id, slot["id"], slot["slot_date"], slot["slot_time"], slot["duration_minutes"], mode, price, fee),
+        )
+    partial = len(reserved) < len(slot_ids)
+
+    if is_free:
+        confirm_order(db, order_id, free=True)
+        db.commit()
+        flash(f"Réservation confirmée ({len(reserved)} séance(s)).", "success")
+        if partial:
+            flash("Certains créneaux choisis n'étaient plus disponibles.", "error")
+        return redirect(url_for("etudiant"))
+
+    db.commit()  # les créneaux restent bloqués pendant le paiement
+    try:
+        checkout = to_plain(stripe.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            locale="fr",
+            line_items=[{
+                "quantity": len(reserved),
+                "price_data": {
+                    "currency": "eur",
+                    "unit_amount": price,
+                    "product_data": {
+                        "name": f"Cours particulier : {course['title']}"[:250],
+                        "description": f"Séance(s) avec {course['teacher_name']}"[:250],
+                    },
+                },
+            }],
+            payment_intent_data={
+                "application_fee_amount": fee * len(reserved),
+                "on_behalf_of": course["stripe_account_id"],
+                "transfer_data": {"destination": course["stripe_account_id"]},
+                "metadata": {"order_id": str(order_id)},
+                "description": f"Commande {order_id} – {course['title']}"[:250],
+            },
+            customer_email=student["email"],
+            client_reference_id=str(order_id),
+            metadata={"order_id": str(order_id)},
+            expires_at=int(time_mod.time() + CHECKOUT_TTL.total_seconds()),
+            success_url=external_url("paiement_retour", order_id=order_id) + "?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url=external_url("paiement_annule", order_id=order_id),
+            idempotency_key=f"checkout-order-{order_id}",
+        ))
+    except stripe.StripeError as exc:
+        app.logger.error("Création de la session Stripe impossible (commande %s) : %s", order_id, exc)
+        release_pending_order(db, order_id, status="canceled")
+        db.commit()
+        flash("Le paiement n'a pas pu être lancé. Aucun montant n'a été débité ; réessayez dans un instant.", "error")
+        return back
+
+    db.execute("UPDATE orders SET stripe_checkout_session_id = ? WHERE id = ?", (checkout["id"], order_id))
+    db.commit()
+    if partial:
+        flash("Certains créneaux choisis n'étaient plus disponibles : seuls les créneaux restants seront payés.", "error")
+    return redirect(checkout["url"], code=303)
+
+
+def own_order(order_id):
+    return get_db().execute(
+        "SELECT * FROM orders WHERE id = ? AND student_id = ?", (order_id, current_user()["id"])
+    ).fetchone()
+
+
+@app.route("/paiement/retour/<int:order_id>")
+@login_required(role="etudiant")
+def paiement_retour(order_id):
+    db = get_db()
+    order = own_order(order_id)
+    if not order:
+        abort(404)
+    if order["status"] == "pending" and order["stripe_checkout_session_id"] and STRIPE_SECRET_KEY:
+        try:
+            cs = stripe.checkout.Session.retrieve(order["stripe_checkout_session_id"])
+            lost = fulfill_checkout_session(db, cs)
+            db.commit()
+            refund_lost_items(db, lost)
+            if lost:
+                flash("Un des créneaux a été réservé par quelqu'un d'autre pendant votre paiement : "
+                      "il vous a été remboursé automatiquement.", "error")
+        except stripe.StripeError:
+            db.rollback()
+            flash("Paiement en cours de vérification : votre réservation apparaîtra dans quelques instants.", "success")
+            return redirect(url_for("etudiant"))
+    order = own_order(order_id)
+    if order["status"] in ("paid", "partially_refunded"):
+        flash("Paiement reçu, votre réservation est confirmée.", "success")
+    elif order["status"] == "pending":
+        flash("Paiement en cours de vérification : votre réservation apparaîtra dans quelques instants.", "success")
+    else:
+        flash("Cette réservation n'a pas abouti.", "error")
+    return redirect(url_for("etudiant"))
+
+
+@app.route("/paiement/annule/<int:order_id>")
+@login_required(role="etudiant")
+def paiement_annule(order_id):
+    db = get_db()
+    order = own_order(order_id)
+    if not order:
+        abort(404)
+    if order["status"] == "pending":
+        done = False
+        if order["stripe_checkout_session_id"] and STRIPE_SECRET_KEY:
+            try:
+                cs = to_plain(stripe.checkout.Session.retrieve(order["stripe_checkout_session_id"]))
+                if cs.get("status") == "complete":
+                    lost = fulfill_checkout_session(db, cs)
+                    db.commit()
+                    refund_lost_items(db, lost)
+                    flash("Le paiement a bien été reçu : votre réservation est confirmée.", "success")
+                    return redirect(url_for("etudiant"))
+                if cs.get("status") == "open":
+                    stripe.checkout.Session.expire(order["stripe_checkout_session_id"])
+                done = True
+            except stripe.StripeError:
+                done = False
+        else:
+            done = True
+        if done:
+            release_pending_order(db, order_id, status="canceled")
+            db.commit()
+    flash("Paiement abandonné : aucun montant n'a été débité et les créneaux ont été libérés.", "success")
+    return redirect(url_for("cours"))
+
+
+@app.route("/paiement/reprendre/<int:order_id>")
+@login_required(role="etudiant")
+def paiement_reprendre(order_id):
+    order = own_order(order_id)
+    if not order or order["status"] != "pending" or not order["stripe_checkout_session_id"] or not STRIPE_SECRET_KEY:
+        flash("Ce paiement ne peut plus être repris.", "error")
+        return redirect(url_for("etudiant"))
+    try:
+        cs = to_plain(stripe.checkout.Session.retrieve(order["stripe_checkout_session_id"]))
+    except stripe.StripeError:
+        flash("Impossible de joindre le service de paiement. Réessayez dans un instant.", "error")
+        return redirect(url_for("etudiant"))
+    if cs.get("status") == "open" and cs.get("url"):
+        return redirect(cs["url"], code=303)
+    return redirect(url_for("paiement_retour", order_id=order_id))
+
+
+@app.route("/stripe/webhook", methods=["POST"])
+@csrf.exempt  # appel serveur à serveur authentifié par la signature Stripe
+def stripe_webhook():
+    secrets_list = [s for s in (STRIPE_WEBHOOK_SECRET, STRIPE_CONNECT_WEBHOOK_SECRET) if s]
+    if not secrets_list:
+        return jsonify({"error": "webhook non configuré"}), 503
+    payload = request.get_data()
+    signature = request.headers.get("Stripe-Signature", "")
+    event = None
+    for secret in secrets_list:
+        try:
+            event = to_plain(stripe.Webhook.construct_event(payload, signature, secret))
+            break
+        except stripe.SignatureVerificationError:
+            continue
+        except ValueError:
+            return jsonify({"error": "contenu invalide"}), 400
+    if event is None:
+        return jsonify({"error": "signature invalide"}), 400
+
+    db = get_db()
+    if db.execute("SELECT 1 FROM stripe_events WHERE id = ?", (event.get("id"),)).fetchone():
+        return jsonify({"received": True})
+    try:
+        lost = handle_stripe_event(db, event)
+        db.execute("INSERT INTO stripe_events(id, type) VALUES (?, ?)", (event.get("id"), event.get("type") or ""))
+        db.commit()
+    except Exception:
+        db.rollback()
+        app.logger.exception("Erreur de traitement du webhook Stripe %s", event.get("id"))
+        return jsonify({"error": "erreur interne"}), 500
+    refund_lost_items(db, lost)
+    return jsonify({"received": True})
+
+
+@app.route("/reservations/<int:slot_id>/annuler", methods=["POST"])
+@login_required(role="etudiant")
+def annuler_reservation(slot_id):
+    db = get_db()
+    user = current_user()
+    slot = db.execute("SELECT * FROM slots WHERE id = ? AND reserved_by = ?", (slot_id, user["id"])).fetchone()
+    if not slot:
+        flash("Réservation introuvable ou déjà annulée.", "error")
+        return redirect(url_for("etudiant"))
+    item = active_item_for_slot(db, slot)
+    if not (item and item["status"] == "pending") and not student_can_cancel(slot, item):
+        flash("Cette séance ne peut plus être annulée en ligne (moins de 12 heures avant le début). "
+              "En cas de problème, utilisez le formulaire de signalement.", "error")
+        return redirect(url_for("etudiant"))
+    try:
+        cancel_reservation(db, slot, "Annulation par l'élève")
+        db.commit()
+    except PaymentError as exc:
+        db.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("etudiant"))
+    flash("Séance annulée. Si elle était payée, le remboursement est en cours sur votre carte (quelques jours ouvrés).", "success")
+    return redirect(url_for("etudiant"))
+
+
+# ---------------------------------------------------------------------------
+# Paiements : historique, justificatifs, compte Stripe du professeur
+# ---------------------------------------------------------------------------
+@app.route("/paiements")
+@login_required()
+def paiements():
+    db = get_db()
+    user = current_user()
+    if user["role"] == "admin":
+        return redirect(url_for("admin_paiements"))
+    if user["role"] == "prof":
+        if user["stripe_account_id"] and not user["stripe_charges_enabled"]:
+            sync_stripe_account(db, user)
+            db.commit()
+            user = refresh_current_user()
+        items = db.execute(
+            """
+            SELECT oi.*, o.course_title, o.student_name, o.paid_at, o.invoice_number, o.id AS order_id
+            FROM order_items oi JOIN orders o ON o.id = oi.order_id
+            WHERE o.teacher_id = ? AND oi.status IN ('paid', 'refunded')
+            ORDER BY o.paid_at DESC, oi.id DESC LIMIT 300
+            """,
+            (user["id"],),
+        ).fetchall()
+        years = sorted({int(str(i["paid_at"])[:4]) for i in items if i["paid_at"]} | {now_local().year}, reverse=True)
+        return render_template(
+            "paiements_prof.html", items=items, years=years,
+            summaries=[teacher_year_summary(db, user["id"], y) for y in years],
+            stripe_configured=bool(STRIPE_SECRET_KEY),
+        )
+    orders = db.execute(
+        "SELECT * FROM orders WHERE student_id = ? AND status != 'canceled' ORDER BY id DESC LIMIT 200", (user["id"],)
+    ).fetchall()
+    items_by_order = {}
+    if orders:
+        placeholders = ",".join("?" for _ in orders)
+        for it in db.execute(
+            f"SELECT * FROM order_items WHERE order_id IN ({placeholders}) ORDER BY slot_date, slot_time",
+            [o["id"] for o in orders],
+        ).fetchall():
+            items_by_order.setdefault(it["order_id"], []).append(it)
+    return render_template("paiements_eleve.html", orders=orders, items_by_order=items_by_order)
+
+
+@app.route("/paiements/stripe/activer", methods=["POST"])
+@login_required(role="prof")
+def stripe_connect_activer():
+    db = get_db()
+    user = current_user()
+    if not STRIPE_SECRET_KEY:
+        flash("Le paiement en ligne n'est pas encore configuré sur le site.", "error")
+        return redirect(url_for("paiements"))
+    if user["teacher_status"] not in TEACHER_STATUSES:
+        flash("Indiquez d'abord votre statut (particulier ou micro-entrepreneur) dans votre profil.", "error")
+        return redirect(url_for("prof_profil"))
+    if is_rate_limited(f"connect:{user['id']}", 10, 3600):
+        flash("Trop de tentatives. Réessayez plus tard.", "error")
+        return redirect(url_for("paiements"))
+    account_id = user["stripe_account_id"]
+    try:
+        if not account_id:
+            account = to_plain(stripe.Account.create(
+                type="express",
+                country="FR",
+                email=user["email"],
+                business_type="individual",
+                capabilities={"card_payments": {"requested": True}, "transfers": {"requested": True}},
+                business_profile={"mcc": "8299", "product_description": "Cours particuliers"},
+                metadata={"user_id": str(user["id"])},
+                idempotency_key=f"connect-account-{user['id']}",
+            ))
+            account_id = account["id"]
+            db.execute("UPDATE users SET stripe_account_id = ? WHERE id = ?", (account_id, user["id"]))
+            audit(db, "stripe_compte_cree", target=f"user:{user['id']}")
+            db.commit()
+        link = to_plain(stripe.AccountLink.create(
+            account=account_id, type="account_onboarding",
+            refresh_url=external_url("stripe_connect_relancer"),
+            return_url=external_url("stripe_connect_retour"),
+        ))
+    except stripe.StripeError as exc:
+        db.rollback()
+        app.logger.error("Stripe Connect (user %s) : %s", user["id"], exc)
+        flash("Stripe n'a pas pu ouvrir l'activation des paiements. Réessayez plus tard.", "error")
+        return redirect(url_for("paiements"))
+    return redirect(link["url"], code=303)
+
+
+@app.route("/paiements/stripe/relancer")
+@login_required(role="prof")
+def stripe_connect_relancer():
+    user = current_user()
+    if not (STRIPE_SECRET_KEY and user["stripe_account_id"]):
+        return redirect(url_for("paiements"))
+    try:
+        link = to_plain(stripe.AccountLink.create(
+            account=user["stripe_account_id"], type="account_onboarding",
+            refresh_url=external_url("stripe_connect_relancer"),
+            return_url=external_url("stripe_connect_retour"),
+        ))
+    except stripe.StripeError:
+        flash("Stripe est momentanément indisponible. Réessayez plus tard.", "error")
+        return redirect(url_for("paiements"))
+    return redirect(link["url"], code=303)
+
+
+@app.route("/paiements/stripe/retour")
+@login_required(role="prof")
+def stripe_connect_retour():
+    db = get_db()
+    sync_stripe_account(db, current_user())
+    db.commit()
+    user = refresh_current_user()
+    if user["stripe_charges_enabled"]:
+        flash("Paiements activés : les élèves peuvent désormais réserver vos cours payants.", "success")
+    else:
+        flash("Votre dossier Stripe n'est pas encore complet ou est en cours de vérification.", "error")
+    return redirect(url_for("paiements"))
+
+
+@app.route("/paiements/stripe/tableau-de-bord")
+@login_required(role="prof")
+def stripe_connect_tableau():
+    user = current_user()
+    if not (STRIPE_SECRET_KEY and user["stripe_account_id"]):
+        return redirect(url_for("paiements"))
+    try:
+        link = to_plain(stripe.Account.create_login_link(user["stripe_account_id"]))
+    except stripe.StripeError:
+        flash("Le tableau de bord Stripe n'est pas accessible pour le moment.", "error")
+        return redirect(url_for("paiements"))
+    return redirect(link["url"], code=303)
+
+
+@app.route("/facture/<int:order_id>")
+@login_required()
+def telecharger_facture(order_id):
+    db = get_db()
+    user = current_user()
+    order = db.execute("SELECT * FROM orders WHERE id = ? AND invoice_number IS NOT NULL", (order_id,)).fetchone()
+    if not order:
+        abort(404)
+    if user["id"] not in (order["student_id"], order["teacher_id"]) and user["role"] != "admin":
+        abort(404)
+    items = db.execute(
+        "SELECT * FROM order_items WHERE order_id = ? AND status IN ('paid', 'refunded') ORDER BY slot_date, slot_time",
+        (order_id,),
+    ).fetchall()
+    pdf = build_invoice_pdf(order, items)
+    prefix = "facture" if order["teacher_status"] in PRO_STATUSES else "recu"
+    return send_file(pdf, mimetype="application/pdf", as_attachment=True,
+                     download_name=f"{prefix}-{order['invoice_number']}.pdf")
+
+
+@app.route("/avoir/<int:item_id>")
+@login_required()
+def telecharger_avoir(item_id):
+    db = get_db()
+    user = current_user()
+    item = db.execute("SELECT * FROM order_items WHERE id = ? AND credit_note_number IS NOT NULL", (item_id,)).fetchone()
+    order = item and db.execute("SELECT * FROM orders WHERE id = ?", (item["order_id"],)).fetchone()
+    if not order or (user["id"] not in (order["student_id"], order["teacher_id"]) and user["role"] != "admin"):
+        abort(404)
+    return send_file(build_credit_note_pdf(order, item), mimetype="application/pdf", as_attachment=True,
+                     download_name=f"avoir-{item['credit_note_number']}.pdf")
+
+
+@app.route("/paiements/recapitulatif/<int:year>")
+@login_required(role="prof")
+def recapitulatif_annuel(year):
+    if not (2020 <= year <= now_local().year):
+        abort(404)
+    user = current_user()
+    summary = teacher_year_summary(get_db(), user["id"], year)
+    return send_file(build_year_summary_pdf(user, summary), mimetype="application/pdf", as_attachment=True,
+                     download_name=f"recapitulatif-{year}.pdf")
+
+
+# ---------------------------------------------------------------------------
+# Authentification : connexion, inscription, déconnexion
+# ---------------------------------------------------------------------------
+@app.route("/connexion", methods=["GET", "POST"])
+def connexion():
+    if current_user():
+        return redirect(dashboard_url_for(current_user()["role"]))
+    if request.method == "POST":
+        email = clean(request.form.get("email", ""), LIMITS["email"]).lower()
+        password = request.form.get("password", "")[:MAX_PASSWORD_LENGTH + 1]
+        if is_rate_limited(f"login-ip:{client_ip()}", 20, 900) or is_rate_limited(f"login-mail:{email}", 8, 900):
+            flash("Trop de tentatives de connexion. Réessayez dans un quart d'heure.", "error")
+            return render_template("connexion.html", email=email), 429
+        user = get_db().execute("SELECT * FROM users WHERE email = ? AND deleted_at IS NULL", (email,)).fetchone()
+        valid = check_password_hash(user["password_hash"] if user else _DUMMY_HASH, password)
+        if user and valid and len(password) <= MAX_PASSWORD_LENGTH:
+            login_user(user)
+            if user["role"] == "admin":
+                db = get_db()
+                audit(db, "connexion_admin", actor_id=user["id"])
+                db.commit()
+            if user["must_change_password"]:
+                flash("Votre mot de passe a été réinitialisé : choisissez-en un nouveau.", "error")
+                return redirect(url_for("parametres"))
+            return redirect(dashboard_url_for(user["role"]))
+        flash("Adresse e-mail ou mot de passe incorrect.", "error")
+        return render_template("connexion.html", email=email)
+    return render_template("connexion.html", email="")
+
+
+@app.route("/inscription", methods=["GET", "POST"])
+def inscription():
+    if current_user():
+        return redirect(dashboard_url_for(current_user()["role"]))
+    registration_mode = get_registration_mode()
+    if request.method == "POST":
+        if is_rate_limited(f"signup:{client_ip()}", 8, 3600):
+            flash("Trop d'inscriptions depuis cette adresse. Réessayez plus tard.", "error")
+            return render_template("inscription.html", registration_mode=registration_mode, form=request.form), 429
+        name = form_value("name", "name")
+        email = clean(request.form.get("email", ""), LIMITS["email"]).lower()
+        password = request.form.get("password", "")
+        role = request.form.get("role")
+        errors = []
+        if role not in ("prof", "etudiant"):
+            errors.append("Choisissez un type de compte.")
+        elif registration_mode == "profs" and role == "etudiant":
+            errors.append("Les inscriptions sont actuellement réservées aux professeurs.")
+        if len(name) < 2:
+            errors.append("Indiquez votre nom.")
+        elif any(word in name.lower() for word in RESERVED_NAME_WORDS):
+            errors.append("Ce nom n'est pas autorisé (il pourrait être confondu avec l'équipe du site).")
+        if not EMAIL_RE.match(email):
+            errors.append("L'adresse e-mail n'est pas valide.")
+        problem = password_problem(password)
+        if problem:
+            errors.append(problem)
+        if not request.form.get("adult"):
+            errors.append("Le compte doit être créé par une personne majeure (l'élève majeur ou son représentant légal).")
+        if not request.form.get("accept_terms"):
+            errors.append("Vous devez accepter les conditions générales d'utilisation.")
+        db = get_db()
+        if not errors and db.execute("SELECT 1 FROM users WHERE email = ?", (email,)).fetchone():
+            errors.append("Un compte existe déjà avec cette adresse e-mail.")
+        if errors:
+            for e in errors:
+                flash(e, "error")
+            return render_template("inscription.html", registration_mode=registration_mode, form=request.form)
+        cur = db.execute(
+            "INSERT INTO users(name, email, password_hash, role, approved, cgu_accepted_at, cgu_version, created_at, last_login_at) "
+            "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (name, email, generate_password_hash(password), role, 0 if role == "prof" else 1, TERMS_VERSION),
+        )
+        db.commit()
+        login_user(db.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone())
+        if role == "prof":
+            flash("Compte créé. Votre profil sera visible après validation par l'équipe ; "
+                  "complétez-le en attendant.", "success")
+            return redirect(url_for("prof_profil"))
+        flash("Compte créé.", "success")
+        return redirect(url_for("cours"))
+    return render_template("inscription.html", registration_mode=registration_mode, form={})
+
+
+@app.route("/deconnexion", methods=["POST"])
+def deconnexion():
+    session.clear()
+    flash("Vous êtes déconnecté.", "success")
+    return redirect(url_for("presentation"))
+
+
+# ---------------------------------------------------------------------------
+# Fichiers téléversés
+# ---------------------------------------------------------------------------
+@app.route("/photos/<filename>")
+def photo_profil(filename):
+    if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,80}", filename):
+        abort(404)
+    db = get_db()
+    owner = db.execute("SELECT * FROM users WHERE photo = ? AND deleted_at IS NULL", (filename,)).fetchone()
+    if not owner:
+        abort(404)
+    public = owner["role"] == "prof" and owner["approved"]
+    if not public:
+        viewer = current_user()
+        allowed = viewer and (
+            viewer["id"] == owner["id"] or viewer["role"] == "admin"
+            or db.execute(
+                "SELECT 1 FROM contacts WHERE (student_id = ? AND teacher_id = ?) OR (student_id = ? AND teacher_id = ?)",
+                (viewer["id"], owner["id"], owner["id"], viewer["id"]),
+            ).fetchone()
+        )
+        if not allowed:
+            abort(404)
+    response = send_from_directory(PROFILE_PHOTOS_DIR, filename, mimetype="image/jpeg", max_age=0 if not public else 3600)
+    response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    if not public:
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@app.route("/messagerie/pieces-jointes/<int:message_id>/<filename>")
+@login_required()
+def uploaded_message_attachment(message_id, filename):
+    user = current_user()
+    message = get_db().execute(
+        "SELECT * FROM messages WHERE id = ? AND attachment_filename = ?", (message_id, filename)
+    ).fetchone()
+    if not message or (user["id"] not in (message["sender_id"], message["recipient_id"]) and user["role"] != "admin"):
+        abort(404)
+    is_pdf = message["attachment_type"] == "pdf"
+    response = send_from_directory(
+        MESSAGE_ATTACHMENTS_DIR, message["attachment_filename"],
+        as_attachment=is_pdf,
+        download_name=message["attachment_original_name"] or message["attachment_filename"],
+        max_age=0,
+    )
+    response.headers["Content-Security-Policy"] = "default-src 'none'; img-src 'self'; sandbox"
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Professeur
+# ---------------------------------------------------------------------------
+@app.route("/prof/tableau-de-bord")
+@login_required(role="prof")
+def prof_dashboard():
+    db = get_db()
+    user = current_user()
+    courses = db.execute("SELECT * FROM courses WHERE teacher_id = ? ORDER BY id DESC", (user["id"],)).fetchall()
+    slots_map = get_slots_map(db, [c["id"] for c in courses])
+    item_map = {}
+    for row in db.execute(
+        """
+        SELECT oi.slot_id, oi.status, oi.amount_cents, o.id AS order_id, o.invoice_number
+        FROM order_items oi JOIN orders o ON o.id = oi.order_id
+        WHERE o.teacher_id = ? AND oi.status IN ('pending', 'paid', 'free') AND oi.slot_id IS NOT NULL
+        """,
+        (user["id"],),
+    ).fetchall():
+        item_map[row["slot_id"]] = row
+    now = now_local()
+    upcoming = sorted(
+        [(c, s) for c in courses for s in slots_map.get(c["id"], []) if s["reserved_by"] and safe_slot_end(s) > now],
+        key=lambda cs: safe_slot_start(cs[1]),
+    )
+    return render_template(
+        "prof_dashboard.html",
+        courses=courses,
+        slots_map=slots_map,
+        item_map=item_map,
+        upcoming=upcoming,
+        my_rating=get_teacher_ratings_map(db, [user["id"]]).get(user["id"]),
+        payments_ready=teacher_can_receive_payments(user),
+        stripe_configured=bool(STRIPE_SECRET_KEY),
+        cancellable={s["id"]: (safe_slot_start(s) - now >= CANCELLATION_MIN_DELAY) for _, s in upcoming},
+    )
+
+
+def handle_profile_form(user, template, extra):
+    """Traitement commun des profils professeur et élève."""
+    db = get_db()
+    bio = form_value("bio", "bio", multiline=True)
+    level = clean(request.form.get("education_level", ""), 60)
+    allowed_levels = NIVEAUX_ETUDE_PROF if user["role"] == "prof" else NIVEAUX
+    if level and level not in allowed_levels:
+        level = ""
+    updates = {"bio": bio or None, "education_level": level or None}
+    if user["role"] == "prof":
+        status = request.form.get("teacher_status", "")
+        siret = re.sub(r"\s", "", request.form.get("siret", ""))
+        if status not in TEACHER_STATUSES:
+            flash("Indiquez votre statut.", "error")
+            return render_template(template, user=user, **extra)
+        if status in PRO_STATUSES and not siret_is_valid(siret):
+            flash("Le numéro SIRET n'est pas valide (14 chiffres).", "error")
+            return render_template(template, user=user, **extra)
+        updates["teacher_status"] = status
+        updates["siret"] = siret if status in PRO_STATUSES else None
+    photo = request.files.get("photo")
+    old_photo = None
+    if photo and photo.filename:
+        try:
+            updates["photo"] = save_profile_photo(photo)
+            old_photo = user["photo"]
+        except UploadError as exc:
+            flash(str(exc), "error")
+            return render_template(template, user=user, **extra)
+    if request.form.get("remove_photo") and "photo" not in updates:
+        updates["photo"] = None
+        old_photo = user["photo"]
+    assignments = ", ".join(f"{k} = ?" for k in updates)
+    db.execute(f"UPDATE users SET {assignments} WHERE id = ?", (*updates.values(), user["id"]))
+    db.commit()
+    delete_file_quietly(PROFILE_PHOTOS_DIR, old_photo)
+    flash("Profil enregistré.", "success")
+    return None
+
+
+@app.route("/prof/profil", methods=["GET", "POST"])
+@login_required(role="prof")
+def prof_profil():
+    user = current_user()
+    extra = {"niveaux_etude": NIVEAUX_ETUDE_PROF}
+    if request.method == "POST":
+        result = handle_profile_form(user, "prof_profil.html", extra)
+        if result is not None:
+            return result
+        return redirect(url_for("prof_profil"))
+    return render_template("prof_profil.html", user=user, **extra)
+
+
+def parse_slots_from_form():
+    errors, slots = [], []
+    now = now_local()
+    for date_val, time_val, duration_val in zip(
+        request.form.getlist("slot_date[]"), request.form.getlist("slot_time[]"), request.form.getlist("slot_duration[]")
+    ):
+        date_val, time_val, duration_val = date_val.strip(), time_val.strip()[:5], duration_val.strip()
+        if not (date_val or time_val):
+            continue
+        try:
+            start = datetime.strptime(f"{date_val} {time_val}", "%Y-%m-%d %H:%M")
+            duration = int(duration_val)
+        except ValueError:
+            errors.append("Chaque créneau doit avoir une date, une heure et une durée valides.")
+            continue
+        if not (15 <= duration <= 480):
+            errors.append("La durée d'une séance doit être comprise entre 15 minutes et 8 heures.")
+            continue
+        if start <= now + BOOKING_MIN_NOTICE or start > now + timedelta(days=366):
+            errors.append("Les créneaux doivent être situés dans le futur, à moins d'un an.")
+            continue
+        slots.append((start.strftime("%Y-%m-%d"), start.strftime("%H:%M"), duration))
+    if len(slots) > MAX_SLOTS_PER_COURSE:
+        errors.append(f"{MAX_SLOTS_PER_COURSE} créneaux au maximum par cours.")
+    return slots, errors
+
+
+@app.route("/prof/creer", methods=["GET", "POST"])
+@login_required(role="prof")
+def prof_creer():
+    user = current_user()
+    context = {"matieres": MATIERES, "niveaux": NIVEAUX, "modes": MODES}
+    if not user["approved"]:
+        flash("Votre profil doit être validé par l'équipe avant de publier des cours.", "error")
+        return redirect(url_for("prof_dashboard"))
+    if user["teacher_status"] not in TEACHER_STATUSES:
+        flash("Indiquez d'abord votre statut dans votre profil.", "error")
+        return redirect(url_for("prof_profil"))
+    if request.method == "POST":
+        title = form_value("title", "title")
+        subjects = [s for s in request.form.getlist("subject") if s in MATIERES]
+        levels = [n for n in request.form.getlist("level") if n in NIVEAUX]
+        description = form_value("description", "description", multiline=True)
+        mode = request.form.get("mode", "")
+        city = form_value("city", "city")
+        errors = []
+        if len(title) < 3:
+            errors.append("Indiquez un titre.")
+        if not subjects:
+            errors.append("Choisissez au moins une matière.")
+        if not levels:
+            errors.append("Choisissez au moins un niveau.")
+        if len(description) < 10:
+            errors.append("Ajoutez une description d'au moins quelques mots.")
+        if mode not in MODES:
+            errors.append("Indiquez si le cours a lieu en ligne, en présentiel, ou les deux.")
+        if mode in ("presentiel", "les_deux") and not city:
+            errors.append("Indiquez la ville des cours en présentiel.")
+        if mode == "en_ligne":
+            city = ""
+        try:
+            price_cents = parse_euros(request.form.get("price", ""))
+            if price_cents and not (PRICE_MIN_CENTS <= price_cents <= PRICE_MAX_CENTS):
+                raise ValueError
+        except ValueError:
+            price_cents = None
+            errors.append(f"Indiquez un prix entre {PRICE_MIN_CENTS // 100} € et {PRICE_MAX_CENTS // 100} € (ou 0 pour un cours gratuit).")
+        if price_cents and not teacher_can_receive_payments(user):
+            errors.append("Activez d'abord les paiements (rubrique « Paiements ») pour proposer un cours payant.")
+        slots, slot_errors = parse_slots_from_form()
+        errors += slot_errors
+        if not slots and not slot_errors:
+            errors.append("Ajoutez au moins un créneau.")
+        if errors:
+            for e in dict.fromkeys(errors):
+                flash(e, "error")
+            return render_template("prof_creer.html", form=request.form, selected_subjects=subjects,
+                                   selected_levels=levels, **context)
+        db = get_db()
+        cur = db.execute(
+            "INSERT INTO courses(title, subject, level, description, teacher_id, mode, city, price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (title, ", ".join(subjects), ", ".join(levels), description, user["id"], mode, city or None, price_cents),
+        )
+        for date_val, time_val, duration in slots:
+            db.execute(
+                "INSERT INTO slots(course_id, slot_date, slot_time, duration_minutes) VALUES (?, ?, ?, ?)",
+                (cur.lastrowid, date_val, time_val, duration),
+            )
+        db.commit()
+        flash(f"Cours publié : {title}", "success")
+        return redirect(url_for("prof_dashboard"))
+    return render_template("prof_creer.html", form={}, selected_subjects=[], selected_levels=[], **context)
+
+
+def delete_course_with_refunds(db, course, actor_id, reason):
+    """Supprime un cours après remboursement des séances à venir. Les
+    séances passées restent dans les commandes (justificatifs)."""
+    slots = db.execute("SELECT * FROM slots WHERE course_id = ?", (course["id"],)).fetchall()
+    now = now_local()
+    for slot in slots:
+        if slot["reserved_by"] and safe_slot_end(slot) > now:
+            cancel_reservation(db, slot, reason, actor_id=actor_id)
+    db.execute("DELETE FROM courses WHERE id = ?", (course["id"],))
+    audit(db, "suppression_cours", target=f"course:{course['id']}", details=reason, actor_id=actor_id)
+
+
+@app.route("/prof/cours/<int:course_id>/supprimer", methods=["POST"])
+@login_required(role="prof")
+def prof_supprimer(course_id):
+    db = get_db()
+    user = current_user()
+    course = db.execute("SELECT * FROM courses WHERE id = ? AND teacher_id = ?", (course_id, user["id"])).fetchone()
+    if not course:
+        abort(404)
+    now = now_local()
+    blocking = [
+        s for s in db.execute("SELECT * FROM slots WHERE course_id = ? AND reserved_by IS NOT NULL", (course_id,)).fetchall()
+        if safe_slot_end(s) > now and safe_slot_start(s) - now < CANCELLATION_MIN_DELAY
+    ]
+    if blocking:
+        flash("Impossible de supprimer ce cours : une séance réservée commence dans moins de 12 heures.", "error")
+        return redirect(url_for("prof_dashboard"))
+    try:
+        delete_course_with_refunds(db, course, user["id"], "Cours annulé par le professeur")
+        db.commit()
+    except PaymentError as exc:
+        db.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("prof_dashboard"))
+    flash("Cours supprimé. Les élèves concernés ont été remboursés.", "success")
+    return redirect(url_for("prof_dashboard"))
+
+
+@app.route("/prof/creneaux/<int:slot_id>/annuler", methods=["POST"])
+@login_required(role="prof")
+def prof_annuler_creneau(slot_id):
+    db = get_db()
+    user = current_user()
+    slot = db.execute(
+        "SELECT sl.* FROM slots sl JOIN courses c ON c.id = sl.course_id WHERE sl.id = ? AND c.teacher_id = ?",
+        (slot_id, user["id"]),
+    ).fetchone()
+    if not slot:
+        abort(404)
+    now = now_local()
+    if slot["reserved_by"] is None:
+        db.execute("DELETE FROM slots WHERE id = ?", (slot_id,))
+        db.commit()
+        flash("Créneau retiré.", "success")
+        return redirect(url_for("prof_dashboard"))
+    if safe_slot_start(slot) - now < CANCELLATION_MIN_DELAY:
+        flash("Cette séance commence dans moins de 12 heures et ne peut plus être annulée en ligne. "
+              "Prévenez l'élève et contactez l'équipe via le formulaire de signalement.", "error")
+        return redirect(url_for("prof_dashboard"))
+    try:
+        cancel_reservation(db, slot, "Séance annulée par le professeur", actor_id=user["id"])
+        db.execute("DELETE FROM slots WHERE id = ?", (slot_id,))
+        db.commit()
+    except PaymentError as exc:
+        db.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("prof_dashboard"))
+    flash("Séance annulée, l'élève a été remboursé.", "success")
+    return redirect(url_for("prof_dashboard"))
+
+
+# ---------------------------------------------------------------------------
+# Élève
+# ---------------------------------------------------------------------------
+@app.route("/etudiant/profil", methods=["GET", "POST"])
+@login_required(role="etudiant")
+def etudiant_profil():
+    user = current_user()
+    extra = {"niveaux": NIVEAUX}
+    if request.method == "POST":
+        result = handle_profile_form(user, "etudiant_profil.html", extra)
+        if result is not None:
+            return result
+        return redirect(url_for("etudiant_profil"))
+    return render_template("etudiant_profil.html", user=user, **extra)
+
+
+@app.route("/etudiant/mes-cours")
+@login_required(role="etudiant")
+def etudiant():
+    db = get_db()
+    user = current_user()
+    rows = db.execute(
+        """
+        SELECT sl.*, c.title, c.subject, c.level, c.teacher_id, c.city AS course_city,
+               u.name AS teacher_name, u.deleted_at AS teacher_deleted
+        FROM slots sl JOIN courses c ON c.id = sl.course_id JOIN users u ON u.id = c.teacher_id
+        WHERE sl.reserved_by = ?
+        ORDER BY sl.slot_date, sl.slot_time
+        """,
+        (user["id"],),
+    ).fetchall()
+    items = {}
+    for r in rows:
+        items[r["id"]] = active_item_for_slot(db, r)
+    now = now_local()
+    upcoming = [r for r in rows if safe_slot_end(r) > now]
+    past = [r for r in rows if safe_slot_end(r) <= now][::-1]
+    rated = {r["teacher_id"]: r["rating"] for r in db.execute(
+        "SELECT teacher_id, rating FROM ratings WHERE student_id = ?", (user["id"],)
+    ).fetchall()}
+    rate_targets = {}
+    for r in past:
+        if r["reservation_status"] == "confirmed" and not r["teacher_deleted"]:
+            rate_targets.setdefault(r["teacher_id"], r["teacher_name"])
+    pending_orders = db.execute(
+        "SELECT * FROM orders WHERE student_id = ? AND status = 'pending' ORDER BY id DESC", (user["id"],)
+    ).fetchall()
+    legacy_balance = user["wallet_cents"] if "wallet_cents" in user.keys() else 0
+    return render_template(
+        "etudiant.html", upcoming=upcoming, past=past, items=items, rated=rated, rate_targets=rate_targets,
+        pending_orders=pending_orders, legacy_balance=legacy_balance or 0,
+        can_cancel={r["id"]: (items[r["id"]] and items[r["id"]]["status"] == "pending") or student_can_cancel(r, items[r["id"]])
+                    for r in upcoming},
+    )
+
+
+def has_completed_session_with(db, student_id, teacher_id):
+    rows = db.execute(
+        "SELECT oi.slot_date, oi.slot_time, oi.duration_minutes FROM order_items oi JOIN orders o ON o.id = oi.order_id "
+        "WHERE o.student_id = ? AND o.teacher_id = ? AND oi.status IN ('paid', 'free')",
+        (student_id, teacher_id),
+    ).fetchall()
+    rows += db.execute(
+        "SELECT sl.slot_date, sl.slot_time, sl.duration_minutes FROM slots sl JOIN courses c ON c.id = sl.course_id "
+        "WHERE sl.reserved_by = ? AND c.teacher_id = ? AND sl.reservation_status = 'confirmed'",
+        (student_id, teacher_id),
+    ).fetchall()
+    now = now_local()
+    return any(safe_slot_end(r) <= now for r in rows)
+
+
+@app.route("/profs/<int:teacher_id>/noter", methods=["POST"])
+@login_required(role="etudiant")
+def noter_prof(teacher_id):
+    db = get_db()
+    user = current_user()
+    teacher = db.execute("SELECT * FROM users WHERE id = ? AND role = 'prof' AND deleted_at IS NULL", (teacher_id,)).fetchone()
+    if not teacher:
+        abort(404)
+    if not has_completed_session_with(db, user["id"], teacher_id):
+        flash("Vous pourrez noter ce professeur après avoir suivi une séance avec lui.", "error")
+        return redirect(url_for("etudiant"))
+    try:
+        rating = int(request.form.get("rating", ""))
+    except ValueError:
+        rating = 0
+    if not 1 <= rating <= 5:
+        flash("Choisissez une note entre 1 et 5.", "error")
+        return redirect(url_for("etudiant"))
+    db.execute(
+        "INSERT INTO ratings(student_id, teacher_id, rating) VALUES (?, ?, ?) "
+        "ON CONFLICT(student_id, teacher_id) DO UPDATE SET rating = excluded.rating, created_at = CURRENT_TIMESTAMP",
+        (user["id"], teacher_id, rating),
+    )
+    db.commit()
+    flash(f"Note enregistrée : {rating}/5.", "success")
+    return redirect(url_for("etudiant"))
 
 
 @app.route("/etudiant/calendrier")
@@ -2630,40 +3142,21 @@ def month_nav(year, month):
 def etudiant_calendrier():
     db = get_db()
     year, month = resolve_month(request.args)
-    (prev_year, prev_month), (next_year, next_month) = month_nav(year, month)
-
-    rows = db.execute(
-        """
-        SELECT sl.*, c.title, c.subject, c.level, u.name AS teacher_name
-        FROM slots sl
-        JOIN courses c ON c.id = sl.course_id
-        JOIN users u ON u.id = c.teacher_id
-        WHERE sl.reserved_by = ?
-        """,
+    (py, pm), (ny, nm) = month_nav(year, month)
+    events = {}
+    for s in db.execute(
+        "SELECT sl.*, c.title, c.subject, c.level, u.name AS teacher_name FROM slots sl "
+        "JOIN courses c ON c.id = sl.course_id JOIN users u ON u.id = c.teacher_id WHERE sl.reserved_by = ?",
         (current_user()["id"],),
-    ).fetchall()
-
-    events_by_date = {}
-    for s in rows:
-        events_by_date.setdefault(s["slot_date"], []).append(
-            {
-                "title": s["title"],
-                "subtitle": f"{s['subject']} · {s['level']} · {s['teacher_name']}",
-                "time": s["slot_time"],
-                "duration": s["duration_minutes"],
-                "status": "reserve",
-            }
-        )
-
-    weeks = build_month_weeks(year, month, events_by_date)
+    ).fetchall():
+        events.setdefault(s["slot_date"], []).append({
+            "title": s["title"], "subtitle": f"{s['subject']} · {s['level']} · {s['teacher_name']}",
+            "time": s["slot_time"], "duration": s["duration_minutes"], "status": "reserve",
+        })
     return render_template(
-        "calendrier.html",
-        weeks=weeks,
-        month_label=f"{MOIS_FR[month]} {year}",
-        jours=JOURS_FR,
-        prev_link=url_for("etudiant_calendrier", year=prev_year, month=prev_month),
-        next_link=url_for("etudiant_calendrier", year=next_year, month=next_month),
-        today_link=url_for("etudiant_calendrier"),
+        "calendrier.html", weeks=build_month_weeks(year, month, events), month_label=f"{MOIS_FR_CAP[month]} {year}",
+        jours=JOURS_COURTS, prev_link=url_for("etudiant_calendrier", year=py, month=pm),
+        next_link=url_for("etudiant_calendrier", year=ny, month=nm), today_link=url_for("etudiant_calendrier"),
         role_mode="etudiant",
     )
 
@@ -2673,205 +3166,424 @@ def etudiant_calendrier():
 def prof_calendrier():
     db = get_db()
     year, month = resolve_month(request.args)
-    (prev_year, prev_month), (next_year, next_month) = month_nav(year, month)
-
-    rows = db.execute(
-        """
-        SELECT sl.*, c.title, c.subject, c.level, s.name AS student_name
-        FROM slots sl
-        JOIN courses c ON c.id = sl.course_id
-        LEFT JOIN users s ON s.id = sl.reserved_by
-        WHERE c.teacher_id = ?
-        """,
+    (py, pm), (ny, nm) = month_nav(year, month)
+    events = {}
+    for s in db.execute(
+        "SELECT sl.*, c.title, c.subject, c.level, st.name AS student_name FROM slots sl "
+        "JOIN courses c ON c.id = sl.course_id LEFT JOIN users st ON st.id = sl.reserved_by WHERE c.teacher_id = ?",
         (current_user()["id"],),
-    ).fetchall()
-
-    events_by_date = {}
-    for s in rows:
-        is_reserved = s["reserved_by"] is not None
-        events_by_date.setdefault(s["slot_date"], []).append(
-            {
-                "title": s["title"],
-                "subtitle": f"{s['subject']} · {s['level']}"
-                + (f" · {s['student_name']}" if is_reserved else " · Disponible"),
-                "time": s["slot_time"],
-                "duration": s["duration_minutes"],
-                "status": "reserve" if is_reserved else "disponible",
-            }
-        )
-
-    weeks = build_month_weeks(year, month, events_by_date)
+    ).fetchall():
+        reserved = s["reserved_by"] is not None
+        events.setdefault(s["slot_date"], []).append({
+            "title": s["title"],
+            "subtitle": f"{s['subject']} · {s['level']} · " + (s["student_name"] or "") if reserved else "libre",
+            "time": s["slot_time"], "duration": s["duration_minutes"], "status": "reserve" if reserved else "disponible",
+        })
     return render_template(
-        "calendrier.html",
-        weeks=weeks,
-        month_label=f"{MOIS_FR[month]} {year}",
-        jours=JOURS_FR,
-        prev_link=url_for("prof_calendrier", year=prev_year, month=prev_month),
-        next_link=url_for("prof_calendrier", year=next_year, month=next_month),
-        today_link=url_for("prof_calendrier"),
+        "calendrier.html", weeks=build_month_weeks(year, month, events), month_label=f"{MOIS_FR_CAP[month]} {year}",
+        jours=JOURS_COURTS, prev_link=url_for("prof_calendrier", year=py, month=pm),
+        next_link=url_for("prof_calendrier", year=ny, month=nm), today_link=url_for("prof_calendrier"),
         role_mode="prof",
     )
 
 
 # ---------------------------------------------------------------------------
-# Routes — Messagerie
+# Administration
 # ---------------------------------------------------------------------------
-def get_admin_id():
-    """Renvoie l'id du compte administrateur unique."""
-    row = get_db().execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1").fetchone()
-    return row["id"] if row else None
-
-
-def get_contact_preview(user_id, other_id):
-    """Dernier message échangé et nombre de messages non lus entre deux comptes."""
+@app.route("/admin/tableau-de-bord")
+@login_required(role="admin")
+def admin_dashboard():
     db = get_db()
-    last = db.execute(
+    users_sql = (
+        "SELECT u.*, (SELECT COUNT(*) FROM courses c WHERE c.teacher_id = u.id) AS course_count, "
+        "(SELECT COUNT(*) FROM slots s WHERE s.reserved_by = u.id) AS booking_count "
+        "FROM users u WHERE u.role = ? AND u.deleted_at IS NULL {extra} ORDER BY u.name"
+    )
+    profs = db.execute(users_sql.format(extra="AND u.approved = 1"), ("prof",)).fetchall()
+    pending = db.execute(users_sql.format(extra="AND u.approved = 0"), ("prof",)).fetchall()
+    students = db.execute(users_sql.format(extra=""), ("etudiant",)).fetchall()
+    courses = db.execute(
+        "SELECT c.*, u.name AS teacher_name, (SELECT COUNT(*) FROM slots s WHERE s.course_id = c.id) AS slot_count, "
+        "(SELECT COUNT(*) FROM slots s WHERE s.course_id = c.id AND s.reserved_by IS NOT NULL) AS reserved_count "
+        "FROM courses c JOIN users u ON u.id = c.teacher_id ORDER BY c.id DESC LIMIT 300"
+    ).fetchall()
+    fees = db.execute(
+        "SELECT COALESCE(SUM(platform_fee_cents), 0) FROM order_items WHERE status = 'paid'"
+    ).fetchone()[0]
+    legacy_count = db.execute(
+        "SELECT (SELECT COUNT(*) FROM users WHERE wallet_cents != 0) + (SELECT COUNT(*) FROM payments WHERE status = 'held') "
+        "+ (SELECT COUNT(*) FROM withdrawals WHERE status = 'pending')"
+    ).fetchone()[0]
+    return render_template(
+        "admin_dashboard.html", profs=profs, pending=pending, students=students, courses=courses,
+        registration_mode=get_registration_mode(), fees_total=fees, legacy_count=legacy_count,
+        teacher_statuses=TEACHER_STATUSES,
+    )
+
+
+@app.route("/admin/parametres/inscriptions", methods=["POST"])
+@login_required(role="admin")
+def admin_definir_mode_inscription():
+    mode = request.form.get("registration_mode")
+    if mode not in ("tous", "profs"):
+        abort(400)
+    db = get_db()
+    db.execute(
+        "INSERT INTO settings(key, value) VALUES ('registration_mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (mode,),
+    )
+    audit(db, "mode_inscription", details=mode)
+    db.commit()
+    flash("Réglage enregistré.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/utilisateurs/<int:user_id>/valider", methods=["POST"])
+@login_required(role="admin")
+def admin_valider_prof(user_id):
+    db = get_db()
+    target = db.execute("SELECT * FROM users WHERE id = ? AND role = 'prof' AND deleted_at IS NULL", (user_id,)).fetchone()
+    if not target:
+        abort(404)
+    db.execute("UPDATE users SET approved = 1 WHERE id = ?", (user_id,))
+    audit(db, "validation_prof", target=f"user:{user_id}")
+    db.commit()
+    flash(f"Profil de {target['name']} validé.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/utilisateurs/<int:user_id>/supprimer", methods=["POST"])
+@login_required(role="admin")
+def admin_supprimer_utilisateur(user_id):
+    db = get_db()
+    target = db.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,)).fetchone()
+    if not target or target["role"] == "admin":
+        flash("Ce compte ne peut pas être supprimé.", "error")
+        return redirect(url_for("admin_dashboard"))
+    try:
+        erase_user(db, target, "suppression par l'administration", actor_id=current_user()["id"], force_refunds=True)
+        db.commit()
+    except PaymentError as exc:
+        db.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("admin_dashboard"))
+    flash(f"Compte de {target['name']} supprimé (séances à venir remboursées).", "success")
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/utilisateurs/<int:user_id>/reinitialiser-mot-de-passe", methods=["POST"])
+@login_required(role="admin")
+def admin_reinitialiser_mot_de_passe(user_id):
+    db = get_db()
+    target = db.execute("SELECT * FROM users WHERE id = ? AND deleted_at IS NULL", (user_id,)).fetchone()
+    if not target or target["role"] == "admin":
+        flash("Ce mot de passe ne peut pas être réinitialisé ici.", "error")
+        return redirect(url_for("admin_dashboard"))
+    temporary = secrets.token_urlsafe(12)
+    db.execute(
+        "UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?",
+        (generate_password_hash(temporary), user_id),
+    )
+    audit(db, "reinitialisation_mot_de_passe", target=f"user:{user_id}")
+    db.commit()
+    return render_template("admin_mot_de_passe.html", target=target, temporary=temporary)
+
+
+@app.route("/admin/cours/<int:course_id>/supprimer", methods=["POST"])
+@login_required(role="admin")
+def admin_supprimer_cours(course_id):
+    db = get_db()
+    course = db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone()
+    if not course:
+        abort(404)
+    try:
+        delete_course_with_refunds(db, course, current_user()["id"], "Cours retiré par l'administration")
+        db.commit()
+    except PaymentError as exc:
+        db.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("admin_dashboard"))
+    flash(f"Cours « {course['title']} » supprimé.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/paiements")
+@login_required(role="admin")
+def admin_paiements():
+    db = get_db()
+    orders = db.execute(
+        "SELECT * FROM orders WHERE status NOT IN ('canceled', 'expired') ORDER BY id DESC LIMIT 300"
+    ).fetchall()
+    items_by_order = {}
+    if orders:
+        placeholders = ",".join("?" for _ in orders)
+        for it in db.execute(f"SELECT * FROM order_items WHERE order_id IN ({placeholders})", [o["id"] for o in orders]).fetchall():
+            items_by_order.setdefault(it["order_id"], []).append(it)
+    totals = db.execute(
+        "SELECT COALESCE(SUM(amount_cents), 0) AS gross, COALESCE(SUM(platform_fee_cents), 0) AS fees "
+        "FROM order_items WHERE status = 'paid'"
+    ).fetchone()
+    return render_template("admin_paiements.html", orders=orders, items_by_order=items_by_order, totals=totals)
+
+
+@app.route("/admin/paiements/<int:item_id>/rembourser", methods=["POST"])
+@login_required(role="admin")
+def admin_rembourser(item_id):
+    db = get_db()
+    reason = form_value("reason", "admin_note") or "Remboursement décidé par l'administration"
+    try:
+        refund_order_item(db, item_id, reason, actor_id=current_user()["id"])
+        db.commit()
+    except PaymentError as exc:
+        db.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("admin_paiements"))
+    flash("Séance remboursée.", "success")
+    return redirect(url_for("admin_paiements"))
+
+
+@app.route("/admin/signalements")
+@login_required(role="admin")
+def admin_signalements():
+    reports = get_db().execute(
+        "SELECT r.*, oi.order_id FROM reports r LEFT JOIN order_items oi ON oi.id = r.order_item_id "
+        "ORDER BY (r.status = 'open') DESC, r.id DESC LIMIT 300"
+    ).fetchall()
+    return render_template("admin_signalements.html", reports=reports, categories=REPORT_CATEGORIES)
+
+
+@app.route("/admin/signalements/<int:report_id>/clore", methods=["POST"])
+@login_required(role="admin")
+def admin_signalement_clore(report_id):
+    db = get_db()
+    note = form_value("admin_note", "admin_note") or None
+    db.execute(
+        "UPDATE reports SET status = 'closed', admin_note = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (note, report_id),
+    )
+    audit(db, "signalement_clos", target=f"report:{report_id}", details=note)
+    db.commit()
+    flash("Signalement clos.", "success")
+    return redirect(url_for("admin_signalements"))
+
+
+@app.route("/admin/anciens-soldes")
+@login_required(role="admin")
+def admin_anciens_soldes():
+    db = get_db()
+    return render_template(
+        "admin_anciens_soldes.html",
+        balances=db.execute("SELECT * FROM users WHERE wallet_cents != 0 ORDER BY wallet_cents DESC").fetchall(),
+        held=db.execute(
+            "SELECT p.*, s.name AS student_name, t.name AS teacher_name FROM payments p "
+            "JOIN users s ON s.id = p.student_id JOIN users t ON t.id = p.teacher_id WHERE p.status = 'held' ORDER BY p.id"
+        ).fetchall(),
+        withdrawals=db.execute(
+            "SELECT w.*, u.name AS user_name, u.email AS user_email FROM withdrawals w JOIN users u ON u.id = w.user_id "
+            "WHERE w.status = 'pending' ORDER BY w.id"
+        ).fetchall(),
+    )
+
+
+@app.route("/admin/anciens-soldes/utilisateurs/<int:user_id>/regler", methods=["POST"])
+@login_required(role="admin")
+def admin_ancien_solde_regler(user_id):
+    db = get_db()
+    target = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not target or not target["wallet_cents"]:
+        abort(404)
+    amount = target["wallet_cents"]
+    db.execute(
+        "INSERT INTO wallet_transactions(user_id, amount_cents, kind, description) VALUES (?, ?, 'withdrawal', ?)",
+        (user_id, -amount, "Solde de l'ancien porte-monnaie réglé hors plateforme"),
+    )
+    db.execute("UPDATE users SET wallet_cents = 0, legacy_settled_at = CURRENT_TIMESTAMP WHERE id = ?", (user_id,))
+    audit(db, "ancien_solde_regle", target=f"user:{user_id}", details=f"{amount} c.")
+    db.commit()
+    flash("Solde marqué comme réglé.", "success")
+    return redirect(url_for("admin_anciens_soldes"))
+
+
+@app.route("/admin/anciens-soldes/paiements/<int:payment_id>/regler", methods=["POST"])
+@login_required(role="admin")
+def admin_ancien_paiement_regler(payment_id):
+    db = get_db()
+    outcome = request.form.get("outcome")
+    if outcome not in ("released", "refunded"):
+        abort(400)
+    if db.execute(
+        "UPDATE payments SET status = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'held'",
+        (outcome, payment_id),
+    ).rowcount:
+        audit(db, "ancien_paiement_regle", target=f"payment:{payment_id}", details=outcome)
+        db.commit()
+        flash("Paiement marqué comme réglé.", "success")
+    return redirect(url_for("admin_anciens_soldes"))
+
+
+@app.route("/admin/anciens-soldes/retraits/<int:withdrawal_id>/<action>", methods=["POST"])
+@login_required(role="admin")
+def admin_ancien_retrait(withdrawal_id, action):
+    db = get_db()
+    demande = db.execute("SELECT * FROM withdrawals WHERE id = ? AND status = 'pending'", (withdrawal_id,)).fetchone()
+    if not demande or action not in ("payer", "refuser"):
+        abort(404)
+    if action == "payer":
+        db.execute("UPDATE withdrawals SET status = 'paid', resolved_at = CURRENT_TIMESTAMP WHERE id = ?", (withdrawal_id,))
+    else:
+        db.execute("UPDATE users SET wallet_cents = wallet_cents + ? WHERE id = ?", (demande["amount_cents"], demande["user_id"]))
+        db.execute(
+            "INSERT INTO wallet_transactions(user_id, amount_cents, kind, description) VALUES (?, ?, 'refund', ?)",
+            (demande["user_id"], demande["amount_cents"], "Retrait refusé : montant recrédité"),
+        )
+        db.execute(
+            "UPDATE withdrawals SET status = 'rejected', admin_note = 'Refusé', resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (withdrawal_id,),
+        )
+    audit(db, f"ancien_retrait_{action}", target=f"withdrawal:{withdrawal_id}")
+    db.commit()
+    flash("Demande de retrait traitée.", "success")
+    return redirect(url_for("admin_anciens_soldes"))
+
+
+@app.route("/admin/journal")
+@login_required(role="admin")
+def admin_journal():
+    rows = get_db().execute(
+        "SELECT a.*, u.name AS actor_name FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id ORDER BY a.id DESC LIMIT 500"
+    ).fetchall()
+    return render_template("admin_journal.html", rows=rows)
+
+
+@app.route("/admin/messagerie")
+@login_required(role="admin")
+def admin_messagerie():
+    conversations = get_db().execute(
         """
-        SELECT body, created_at, sender_id FROM messages
-        WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
-        ORDER BY id DESC LIMIT 1
-        """,
+        SELECT ct.student_id, ct.teacher_id, s.name AS student_name, t.name AS teacher_name,
+               (SELECT COUNT(*) FROM messages m WHERE (m.sender_id = ct.student_id AND m.recipient_id = ct.teacher_id)
+                   OR (m.sender_id = ct.teacher_id AND m.recipient_id = ct.student_id)) AS message_count,
+               (SELECT MAX(m.created_at) FROM messages m WHERE (m.sender_id = ct.student_id AND m.recipient_id = ct.teacher_id)
+                   OR (m.sender_id = ct.teacher_id AND m.recipient_id = ct.student_id)) AS last_at
+        FROM contacts ct JOIN users s ON s.id = ct.student_id JOIN users t ON t.id = ct.teacher_id
+        GROUP BY ct.student_id, ct.teacher_id
+        ORDER BY last_at IS NULL, last_at DESC
+        """
+    ).fetchall()
+    return render_template("admin_messagerie.html", conversations=conversations)
+
+
+@app.route("/admin/messagerie/<int:student_id>/<int:teacher_id>", methods=["GET", "POST"])
+@login_required(role="admin")
+def admin_messagerie_thread(student_id, teacher_id):
+    """Consultation d'une conversation par la modération : uniquement sur
+    motif (signalement, protection d'un mineur…), motif obligatoire et
+    journalisé (proportionnalité exigée par le RGPD)."""
+    db = get_db()
+    if not db.execute("SELECT 1 FROM contacts WHERE student_id = ? AND teacher_id = ?", (student_id, teacher_id)).fetchone():
+        abort(404)
+    student = db.execute("SELECT * FROM users WHERE id = ?", (student_id,)).fetchone()
+    teacher = db.execute("SELECT * FROM users WHERE id = ?", (teacher_id,)).fetchone()
+    if request.method == "POST":
+        reason = form_value("reason", "admin_note")
+        if len(reason) < 5:
+            flash("Indiquez le motif de la consultation.", "error")
+            return render_template("admin_messagerie_thread.html", student=student, teacher=teacher, thread=None)
+        audit(db, "lecture_conversation", target=f"conversation:{student_id}-{teacher_id}", details=reason)
+        db.commit()
+        thread = db.execute(
+            "SELECT * FROM messages WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?) ORDER BY id",
+            (student_id, teacher_id, teacher_id, student_id),
+        ).fetchall()
+        return render_template("admin_messagerie_thread.html", student=student, teacher=teacher, thread=thread, reason=reason)
+    return render_template("admin_messagerie_thread.html", student=student, teacher=teacher, thread=None)
+
+
+# ---------------------------------------------------------------------------
+# Messagerie
+# ---------------------------------------------------------------------------
+def get_contact_preview(db, user_id, other_id):
+    last = db.execute(
+        "SELECT body, created_at, sender_id, attachment_filename FROM messages "
+        "WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?) ORDER BY id DESC LIMIT 1",
         (user_id, other_id, other_id, user_id),
     ).fetchone()
     unread = db.execute(
-        "SELECT COUNT(*) FROM messages WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
-        (other_id, user_id),
+        "SELECT COUNT(*) FROM messages WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL", (other_id, user_id)
     ).fetchone()[0]
     return last, unread
 
 
 def get_contacts(user):
-    """Retourne la liste des correspondants autorisés : profs pour un élève,
-    élèves pour un prof, tous les profs/élèves pour l'administrateur — avec
-    dans tous les cas le nombre de messages non lus et un aperçu du dernier
-    message échangé. L'administrateur est toujours proposé comme
-    correspondant aux profs et aux élèves, même sans cours réservé ensemble."""
     db = get_db()
     if user["role"] == "admin":
         rows = db.execute(
-            "SELECT id, name, role FROM users WHERE role IN ('prof', 'etudiant') ORDER BY role, name"
+            "SELECT id, name, role FROM users WHERE role IN ('prof', 'etudiant') AND deleted_at IS NULL ORDER BY role, name"
         ).fetchall()
-        contacts = []
-        for r in rows:
-            last, unread = get_contact_preview(user["id"], r["id"])
-            contacts.append({"id": r["id"], "name": r["name"], "role": r["role"], "last": last, "unread": unread})
-        contacts.sort(key=lambda c: (c["last"]["created_at"] if c["last"] else ""), reverse=True)
-        return contacts
-
-    if user["role"] == "etudiant":
+    elif user["role"] == "etudiant":
         rows = db.execute(
-            """
-            SELECT u.id, u.name, u.role
-            FROM contacts ct
-            JOIN users u ON u.id = ct.teacher_id
-            WHERE ct.student_id = ?
-            GROUP BY u.id
-            ORDER BY u.name
-            """,
-            (user["id"],),
-        ).fetchall()
-    elif user["role"] == "prof":
-        rows = db.execute(
-            """
-            SELECT u.id, u.name, u.role
-            FROM contacts ct
-            JOIN users u ON u.id = ct.student_id
-            WHERE ct.teacher_id = ?
-            GROUP BY u.id
-            ORDER BY u.name
-            """,
+            "SELECT u.id, u.name, u.role FROM contacts ct JOIN users u ON u.id = ct.teacher_id "
+            "WHERE ct.student_id = ? AND u.deleted_at IS NULL GROUP BY u.id ORDER BY u.name",
             (user["id"],),
         ).fetchall()
     else:
-        return []
-
+        rows = db.execute(
+            "SELECT u.id, u.name, u.role FROM contacts ct JOIN users u ON u.id = ct.student_id "
+            "WHERE ct.teacher_id = ? AND u.deleted_at IS NULL GROUP BY u.id ORDER BY u.name",
+            (user["id"],),
+        ).fetchall()
     contacts = []
     for r in rows:
-        last, unread = get_contact_preview(user["id"], r["id"])
+        last, unread = get_contact_preview(db, user["id"], r["id"])
         contacts.append({"id": r["id"], "name": r["name"], "role": r["role"], "last": last, "unread": unread})
-
-    # L'administrateur est toujours joignable par un prof ou un élève, même
-    # sans mise en relation préalable via un cours.
-    admin_id = get_admin_id()
-    if admin_id:
-        admin_row = db.execute("SELECT name FROM users WHERE id = ?", (admin_id,)).fetchone()
-        last, unread = get_contact_preview(user["id"], admin_id)
-        contacts.append({"id": admin_id, "name": admin_row["name"], "role": "admin", "last": last, "unread": unread})
-
+    if user["role"] != "admin":
+        admin_id = get_admin_id(db)
+        if admin_id:
+            last, unread = get_contact_preview(db, user["id"], admin_id)
+            contacts.append({"id": admin_id, "name": "Équipe " + SITE_NAME, "role": "admin", "last": last, "unread": unread})
     contacts.sort(key=lambda c: (c["last"]["created_at"] if c["last"] else ""), reverse=True)
     return contacts
 
 
 def is_allowed_contact(user, other_id):
     db = get_db()
+    other = db.execute("SELECT role, deleted_at FROM users WHERE id = ?", (other_id,)).fetchone()
+    if not other or other["deleted_at"] or other_id == user["id"]:
+        return False
     if user["role"] == "admin":
-        row = db.execute(
-            "SELECT 1 FROM users WHERE id = ? AND role IN ('prof', 'etudiant')", (other_id,)
-        ).fetchone()
-        return row is not None
-    if other_id == get_admin_id():
+        return other["role"] in ("prof", "etudiant")
+    if other["role"] == "admin":
         return True
     if user["role"] == "etudiant":
-        row = db.execute(
-            "SELECT 1 FROM contacts WHERE student_id = ? AND teacher_id = ?",
-            (user["id"], other_id),
-        ).fetchone()
-    elif user["role"] == "prof":
-        row = db.execute(
-            "SELECT 1 FROM contacts WHERE teacher_id = ? AND student_id = ?",
-            (user["id"], other_id),
-        ).fetchone()
-    else:
-        row = None
-    return row is not None
-
-
-@app.context_processor
-def inject_unread_total():
-    user = current_user()
-    if user and user["role"] in ("prof", "etudiant", "admin"):
-        total = get_db().execute(
-            "SELECT COUNT(*) FROM messages WHERE recipient_id = ? AND read_at IS NULL",
-            (user["id"],),
-        ).fetchone()[0]
-        pending_withdrawals = 0
-        if user["role"] == "admin":
-            pending_withdrawals = get_db().execute(
-                "SELECT COUNT(*) FROM withdrawals WHERE status = 'pending'"
-            ).fetchone()[0]
-        return {"unread_messages_total": total, "pending_withdrawals_total": pending_withdrawals}
-    return {"unread_messages_total": 0, "pending_withdrawals_total": 0}
+        return bool(db.execute("SELECT 1 FROM contacts WHERE student_id = ? AND teacher_id = ?", (user["id"], other_id)).fetchone())
+    if user["role"] == "prof":
+        return bool(db.execute("SELECT 1 FROM contacts WHERE teacher_id = ? AND student_id = ?", (user["id"], other_id)).fetchone())
+    return False
 
 
 @app.route("/messagerie")
 @login_required()
 def messagerie():
-    user = current_user()
-    contacts = get_contacts(user)
-    return render_template("messagerie.html", contacts=contacts)
+    return render_template("messagerie.html", contacts=get_contacts(current_user()))
 
 
 @app.route("/messagerie/diffusion", methods=["POST"])
 @login_required(role="admin")
 def messagerie_diffusion():
-    """Envoie un même message à tous les professeurs et élèves inscrits."""
     user = current_user()
-    body = request.form.get("body", "").strip()
+    body = form_value("body", "message", multiline=True)
     if not body:
         flash("Écrivez un message avant de l'envoyer.", "error")
         return redirect(url_for("messagerie"))
-
     db = get_db()
-    destinataires = db.execute(
-        "SELECT id FROM users WHERE role IN ('prof', 'etudiant')"
-    ).fetchall()
-    for d in destinataires:
-        db.execute(
-            "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
-            (user["id"], d["id"], body),
-        )
+    recipients = db.execute("SELECT id FROM users WHERE role IN ('prof', 'etudiant') AND deleted_at IS NULL").fetchall()
+    db.executemany(
+        "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
+        [(user["id"], r["id"], body) for r in recipients],
+    )
+    audit(db, "message_diffuse", details=f"{len(recipients)} destinataires")
     db.commit()
-    flash(f"Message envoyé à {len(destinataires)} utilisateur(s).", "success")
+    flash(f"Message envoyé à {len(recipients)} personne(s).", "success")
     return redirect(url_for("messagerie"))
 
 
@@ -2879,335 +3591,244 @@ def messagerie_diffusion():
 @login_required()
 def messagerie_conversation(contact_id):
     user = current_user()
-
     db = get_db()
-    contact = db.execute("SELECT * FROM users WHERE id = ?", (contact_id,)).fetchone()
+    contact = db.execute("SELECT id, name, role FROM users WHERE id = ?", (contact_id,)).fetchone()
     if not contact or not is_allowed_contact(user, contact_id):
-        flash("Vous ne pouvez échanger qu'avec un professeur ou un élève avec qui un cours a été réservé.", "error")
+        flash("Vous ne pouvez écrire qu'aux personnes avec qui vous avez réservé une séance, ou à l'équipe.", "error")
         return redirect(url_for("messagerie"))
-
     if request.method == "POST":
-        body = request.form.get("body", "").strip()
-        attachment_file = request.files.get("attachment")
-
-        attachment_filename = attachment_original_name = attachment_type = None
-        if attachment_file and attachment_file.filename:
+        if is_rate_limited(f"msg:{user['id']}", 30, 60):
+            flash("Vous envoyez trop de messages. Patientez une minute.", "error")
+            return redirect(url_for("messagerie_conversation", contact_id=contact_id))
+        body = form_value("body", "message", multiline=True)
+        attachment = request.files.get("attachment")
+        stored = original = kind = None
+        if attachment and attachment.filename:
             try:
-                attachment_filename, attachment_original_name, attachment_type = save_message_attachment(
-                    attachment_file
-                )
-            except ValueError as exc:
+                stored, original, kind = save_message_attachment(attachment)
+            except UploadError as exc:
                 flash(str(exc), "error")
                 return redirect(url_for("messagerie_conversation", contact_id=contact_id))
-
-        if body or attachment_filename:
+        if body or stored:
             db.execute(
-                """
-                INSERT INTO messages(sender_id, recipient_id, body, attachment_filename, attachment_original_name, attachment_type)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (user["id"], contact_id, body, attachment_filename, attachment_original_name, attachment_type),
+                "INSERT INTO messages(sender_id, recipient_id, body, attachment_filename, attachment_original_name, attachment_type) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (user["id"], contact_id, body, stored, original, kind),
             )
             db.commit()
-        return redirect(url_for("messagerie_conversation", contact_id=contact_id))
-
-    # Marque comme lus les messages reçus de ce correspondant.
+        return redirect(url_for("messagerie_conversation", contact_id=contact_id) + "#dernier")
     db.execute(
         "UPDATE messages SET read_at = CURRENT_TIMESTAMP WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
         (contact_id, user["id"]),
     )
     db.commit()
-
     thread = db.execute(
-        """
-        SELECT * FROM messages
-        WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
-        ORDER BY id ASC
-        """,
+        "SELECT * FROM messages WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?) ORDER BY id",
         (user["id"], contact_id, contact_id, user["id"]),
     ).fetchall()
-
-    contacts = get_contacts(user)
-    return render_template(
-        "messagerie.html", contacts=contacts, active_contact=contact, thread=thread
-    )
+    display_name = ("Équipe " + SITE_NAME) if contact["role"] == "admin" and user["role"] != "admin" else contact["name"]
+    return render_template("messagerie.html", contacts=get_contacts(user), active_contact=contact,
+                           active_name=display_name, thread=thread)
 
 
 # ---------------------------------------------------------------------------
-# Routes — Visioconférence
+# Visioconférence et tableau blanc
 # ---------------------------------------------------------------------------
 def get_course_and_partner(course_id, slot_id, user):
-    """Vérifie que l'utilisateur a le droit d'accéder à la visio de ce créneau
-    (le prof qui a créé le cours, ou l'élève qui a réservé ce créneau précis)
-    et renvoie (cours, créneau, id_du_correspondant), ou (None, None, None)
-    si l'accès est refusé. La réservation étant désormais faite créneau par
-    créneau, un même cours peut être partagé par plusieurs élèves différents :
-    c'est le créneau, pas le cours, qui détermine le binôme prof/élève."""
     db = get_db()
-    course = db.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone()
-    if not course:
-        return None, None, None
-    slot = db.execute(
-        "SELECT * FROM slots WHERE id = ? AND course_id = ?", (slot_id, course_id)
+    row = db.execute(
+        "SELECT sl.*, c.teacher_id, c.title FROM slots sl JOIN courses c ON c.id = sl.course_id WHERE sl.id = ? AND c.id = ?",
+        (slot_id, course_id),
     ).fetchone()
-    if not slot:
+    if not row or row["reservation_status"] != "confirmed" or not row["reserved_by"]:
         return None, None, None
-    if user["role"] == "prof" and course["teacher_id"] == user["id"]:
-        return course, slot, slot["reserved_by"]
-    if user["role"] == "etudiant" and slot["reserved_by"] == user["id"]:
-        return course, slot, course["teacher_id"]
+    if user["role"] == "prof" and row["teacher_id"] == user["id"]:
+        return row, row, row["reserved_by"]
+    if user["role"] == "etudiant" and row["reserved_by"] == user["id"]:
+        return row, row, row["teacher_id"]
     return None, None, None
 
 
+def visio_json_guard(course_id, slot_id):
+    user = current_user()
+    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
+    if not course:
+        return None, None, None, (jsonify({"error": "accès refusé"}), 403)
+    return user, slot, partner_id, None
+
+
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio")
-@login_required()
+@login_required(role=("prof", "etudiant"))
 def visio(course_id, slot_id):
     user = current_user()
-    if user["role"] not in ("prof", "etudiant"):
-        flash("La visioconférence est réservée aux professeurs et aux élèves.", "error")
-        return redirect(dashboard_url_for(user["role"]))
-
     course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
-    if not course or not slot:
+    if not course:
         flash("Vous n'avez pas accès à la visioconférence de ce créneau.", "error")
         return redirect(dashboard_url_for(user["role"]))
-    if not partner_id:
-        flash("Ce créneau doit d'abord être réservé par un élève pour démarrer la visioconférence.", "error")
-        return redirect(dashboard_url_for(user["role"]))
     if slot["slot_mode"] != "en_ligne":
-        flash("Ce créneau se déroule en présentiel : pas de visioconférence pour ce cours.", "error")
+        flash("Cette séance a lieu en présentiel.", "error")
         return redirect(dashboard_url_for(user["role"]))
-
     db = get_db()
-    partner = db.execute("SELECT * FROM users WHERE id = ?", (partner_id,)).fetchone()
-
-    # Historique des messages échangés avec ce correspondant, affiché dans le
-    # panneau de chat de la visio (mêmes messages que dans la messagerie).
-    chat_messages = db.execute(
-        """
-        SELECT * FROM messages
-        WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
-        ORDER BY id ASC
-        """,
+    partner = db.execute("SELECT id, name FROM users WHERE id = ?", (partner_id,)).fetchone()
+    chat = db.execute(
+        "SELECT * FROM messages WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?) "
+        "ORDER BY id DESC LIMIT 100",
         (user["id"], partner_id, partner_id, user["id"]),
-    ).fetchall()
+    ).fetchall()[::-1]
     db.execute(
         "UPDATE messages SET read_at = CURRENT_TIMESTAMP WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
         (partner_id, user["id"]),
     )
     db.commit()
+    config = {
+        "myUserId": user["id"],
+        "partnerName": partner["name"],
+        "lastChatId": chat[-1]["id"] if chat else 0,
+        "stunUrls": WEBRTC_STUN_URLS,
+        "urls": {
+            "send": url_for("visio_envoyer", course_id=course_id, slot_id=slot_id),
+            "poll": url_for("visio_recevoir", course_id=course_id, slot_id=slot_id),
+            "chatSend": url_for("visio_chat_envoyer", course_id=course_id, slot_id=slot_id),
+            "chatPoll": url_for("visio_chat_recevoir", course_id=course_id, slot_id=slot_id),
+            "wbDraw": url_for("visio_tableau_dessiner", course_id=course_id, slot_id=slot_id),
+            "wbPoll": url_for("visio_tableau_recevoir", course_id=course_id, slot_id=slot_id),
+            "wbUndo": url_for("visio_tableau_annuler", course_id=course_id, slot_id=slot_id),
+        },
+    }
+    return render_template("visio.html", course=course, slot=slot, partner=partner, chat_messages=chat, visio_config=config)
 
-    return render_template("visio.html", course=course, slot=slot, partner=partner, chat_messages=chat_messages)
+
+MAX_SIGNAL_BYTES = 20_000
 
 
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/envoyer", methods=["POST"])
-@login_required()
-@csrf.exempt  # appelé en fetch() JSON same-origin ; déjà protégé par SameSite=Lax + absence de CORS
+@login_required(role=("prof", "etudiant"))
 def visio_envoyer(course_id, slot_id):
-    user = current_user()
-    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
-    if not course or not slot or not partner_id:
-        return jsonify({"error": "accès refusé"}), 403
-
+    user, slot, partner_id, error = visio_json_guard(course_id, slot_id)
+    if error:
+        return error
+    if is_rate_limited(f"signal:{user['id']}", 300, 60):
+        return jsonify({"error": "trop de requêtes"}), 429
     data = request.get_json(silent=True) or {}
     signal_type = data.get("type")
-    payload = data.get("payload")
-    if signal_type not in ("offer", "answer", "candidate", "leave") or payload is None:
+    payload = json.dumps(data.get("payload"))
+    if signal_type not in ("offer", "answer", "candidate", "leave") or payload == "null" or len(payload) > MAX_SIGNAL_BYTES:
         return jsonify({"error": "signal invalide"}), 400
-
     db = get_db()
     db.execute(
         "INSERT INTO signals(course_id, sender_id, recipient_id, type, payload) VALUES (?, ?, ?, ?, ?)",
-        (course_id, user["id"], partner_id, signal_type, json.dumps(payload)),
+        (course_id, user["id"], partner_id, signal_type, payload),
     )
     db.commit()
     return jsonify({"ok": True})
 
 
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/recevoir")
-@login_required()
+@login_required(role=("prof", "etudiant"))
 def visio_recevoir(course_id, slot_id):
-    user = current_user()
-    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
-    if not course or not slot or not partner_id:
-        return jsonify({"error": "accès refusé"}), 403
-
-    since = request.args.get("since", 0, type=int)
-    db = get_db()
-    rows = db.execute(
-        """
-        SELECT * FROM signals
-        WHERE course_id = ? AND recipient_id = ? AND id > ?
-        ORDER BY id ASC
-        """,
-        (course_id, user["id"], since),
+    user, slot, partner_id, error = visio_json_guard(course_id, slot_id)
+    if error:
+        return error
+    rows = get_db().execute(
+        "SELECT * FROM signals WHERE course_id = ? AND recipient_id = ? AND sender_id = ? AND id > ? ORDER BY id LIMIT 200",
+        (course_id, user["id"], partner_id, request.args.get("since", 0, type=int)),
     ).fetchall()
-    return jsonify(
-        {
-            "signals": [
-                {"id": r["id"], "type": r["type"], "payload": json.loads(r["payload"])}
-                for r in rows
-            ]
-        }
-    )
+    return jsonify({"signals": [{"id": r["id"], "type": r["type"], "payload": json.loads(r["payload"])} for r in rows]})
 
 
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/message/envoyer", methods=["POST"])
-@login_required()
-@csrf.exempt  # appelé en fetch() JSON same-origin ; déjà protégé par SameSite=Lax + absence de CORS
+@login_required(role=("prof", "etudiant"))
 def visio_chat_envoyer(course_id, slot_id):
-    """Envoie un message de chat pendant la visio. Les messages sont stockés
-    dans la même table que la messagerie classique : ils apparaissent donc
-    aussi dans les conversations habituelles."""
-    user = current_user()
-    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
-    if not course or not slot or not partner_id:
-        return jsonify({"error": "accès refusé"}), 403
-
-    data = request.get_json(silent=True) or {}
-    body = (data.get("body") or "").strip()
+    user, slot, partner_id, error = visio_json_guard(course_id, slot_id)
+    if error:
+        return error
+    if is_rate_limited(f"msg:{user['id']}", 30, 60):
+        return jsonify({"error": "trop de messages"}), 429
+    body = clean((request.get_json(silent=True) or {}).get("body"), LIMITS["message"], multiline=True)
     if not body:
         return jsonify({"error": "message vide"}), 400
-
     db = get_db()
-    cur = db.execute(
-        "INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)",
-        (user["id"], partner_id, body),
-    )
+    cur = db.execute("INSERT INTO messages(sender_id, recipient_id, body) VALUES (?, ?, ?)", (user["id"], partner_id, body))
     db.commit()
     row = db.execute("SELECT * FROM messages WHERE id = ?", (cur.lastrowid,)).fetchone()
-    return jsonify(
-        {
-            "message": {
-                "id": row["id"],
-                "body": row["body"],
-                "created_at": row["created_at"],
-                "sender_id": row["sender_id"],
-            }
-        }
-    )
+    return jsonify({"message": {"id": row["id"], "body": row["body"], "created_at": date_fr(row["created_at"]), "sender_id": row["sender_id"]}})
 
 
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/message/recevoir")
-@login_required()
+@login_required(role=("prof", "etudiant"))
 def visio_chat_recevoir(course_id, slot_id):
-    """Poll des nouveaux messages de chat échangés avec le correspondant de
-    cette visio, pour affichage en direct dans le panneau de messagerie."""
-    user = current_user()
-    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
-    if not course or not slot or not partner_id:
-        return jsonify({"error": "accès refusé"}), 403
-
-    since = request.args.get("since", 0, type=int)
+    user, slot, partner_id, error = visio_json_guard(course_id, slot_id)
+    if error:
+        return error
     db = get_db()
     rows = db.execute(
-        """
-        SELECT * FROM messages
-        WHERE ((sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?))
-          AND id > ?
-        ORDER BY id ASC
-        """,
-        (user["id"], partner_id, partner_id, user["id"], since),
+        "SELECT * FROM messages WHERE ((sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)) "
+        "AND id > ? ORDER BY id LIMIT 200",
+        (user["id"], partner_id, partner_id, user["id"], request.args.get("since", 0, type=int)),
     ).fetchall()
-    # Les messages reçus du correspondant pendant la visio sont marqués lus
-    # puisque l'utilisateur est en train de regarder la conversation.
-    db.execute(
-        "UPDATE messages SET read_at = CURRENT_TIMESTAMP WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
-        (partner_id, user["id"]),
-    )
-    db.commit()
-    return jsonify(
-        {
-            "messages": [
-                {
-                    "id": r["id"],
-                    "body": r["body"],
-                    "created_at": r["created_at"],
-                    "sender_id": r["sender_id"],
-                }
-                for r in rows
-            ]
-        }
-    )
+    if rows:
+        db.execute(
+            "UPDATE messages SET read_at = CURRENT_TIMESTAMP WHERE sender_id = ? AND recipient_id = ? AND read_at IS NULL",
+            (partner_id, user["id"]),
+        )
+        db.commit()
+    return jsonify({"messages": [
+        {"id": r["id"], "body": r["body"], "created_at": date_fr(r["created_at"]), "sender_id": r["sender_id"]} for r in rows
+    ]})
 
 
-MAX_WHITEBOARD_POINTS = 2000  # borne défensive : un seul trait ne peut pas dépasser ce nombre de points
+MAX_WHITEBOARD_POINTS = 2000
 
 
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/tableau/dessiner", methods=["POST"])
-@login_required()
-@csrf.exempt  # appelé en fetch() JSON same-origin ; déjà protégé par SameSite=Lax + absence de CORS
+@login_required(role=("prof", "etudiant"))
 def visio_tableau_dessiner(course_id, slot_id):
-    """Enregistre un trait (ou un effacement complet) sur le tableau blanc
-    partagé de ce créneau, pour qu'il soit relu par l'autre participant."""
-    user = current_user()
-    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
-    if not course or not slot or not partner_id:
-        return jsonify({"error": "accès refusé"}), 403
-
+    user, slot, partner_id, error = visio_json_guard(course_id, slot_id)
+    if error:
+        return error
+    if is_rate_limited(f"wb:{user['id']}", 240, 60):
+        return jsonify({"error": "trop de requêtes"}), 429
     data = request.get_json(silent=True) or {}
     kind = data.get("kind")
-
     if kind == "clear":
-        stroke_data = {}
+        stroke = {}
     elif kind == "stroke":
-        points = data.get("points")
-        color = data.get("color")
-        width = data.get("width")
-        mode = data.get("mode")
-        if (
-            not isinstance(points, list)
-            or not points
-            or len(points) > MAX_WHITEBOARD_POINTS
-            or not all(
-                isinstance(p, list) and len(p) == 2 and all(isinstance(v, (int, float)) for v in p)
-                for p in points
-            )
-            or not isinstance(color, str)
-            or len(color) > 16
-            or not isinstance(width, (int, float))
-            or not (1 <= width <= 40)
-            or mode not in ("draw", "erase")
-        ):
+        points, color, width, mode = data.get("points"), data.get("color"), data.get("width"), data.get("mode")
+        valid_points = (
+            isinstance(points, list) and 0 < len(points) <= MAX_WHITEBOARD_POINTS
+            and all(isinstance(p, list) and len(p) == 2
+                    and all(isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1 for v in p)
+                    for p in points)
+        )
+        if not (valid_points and isinstance(color, str) and HEX_COLOR_RE.match(color)
+                and isinstance(width, (int, float)) and not isinstance(width, bool) and 1 <= width <= 40
+                and mode in ("draw", "erase")):
             return jsonify({"error": "trait invalide"}), 400
-        stroke_data = {"points": points, "color": color, "width": width, "mode": mode}
+        stroke = {"points": [[round(x, 4), round(y, 4)] for x, y in points], "color": color, "width": width, "mode": mode}
     else:
-        return jsonify({"error": "type de trait invalide"}), 400
-
+        return jsonify({"error": "type invalide"}), 400
     db = get_db()
     cur = db.execute(
         "INSERT INTO whiteboard_strokes(course_id, slot_id, sender_id, kind, data) VALUES (?, ?, ?, ?, ?)",
-        (course_id, slot_id, user["id"], kind, json.dumps(stroke_data)),
+        (course_id, slot_id, user["id"], kind, json.dumps(stroke)),
     )
     db.commit()
     return jsonify({"ok": True, "id": cur.lastrowid})
 
 
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/tableau/annuler", methods=["POST"])
-@login_required()
-@csrf.exempt  # appelé en fetch() JSON same-origin ; déjà protégé par SameSite=Lax + absence de CORS
+@login_required(role=("prof", "etudiant"))
 def visio_tableau_annuler(course_id, slot_id):
-    """Annule le dernier trait dessiné par l'utilisateur courant sur ce
-    tableau (et seulement le sien : impossible d'annuler le trait de
-    l'autre participant). Insère un événement 'undo' pointant vers le trait
-    supprimé, pour que l'autre participant le retire aussi de son affichage."""
-    user = current_user()
-    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
-    if not course or not slot or not partner_id:
-        return jsonify({"error": "accès refusé"}), 403
-
+    user, slot, partner_id, error = visio_json_guard(course_id, slot_id)
+    if error:
+        return error
     db = get_db()
     last = db.execute(
-        """
-        SELECT id FROM whiteboard_strokes
-        WHERE course_id = ? AND slot_id = ? AND sender_id = ? AND kind = 'stroke'
-        ORDER BY id DESC LIMIT 1
-        """,
-        (course_id, slot_id, user["id"]),
+        "SELECT id FROM whiteboard_strokes WHERE slot_id = ? AND sender_id = ? AND kind = 'stroke' ORDER BY id DESC LIMIT 1",
+        (slot_id, user["id"]),
     ).fetchone()
     if not last:
         return jsonify({"error": "aucun trait à annuler"}), 404
-
     db.execute("DELETE FROM whiteboard_strokes WHERE id = ?", (last["id"],))
     cur = db.execute(
         "INSERT INTO whiteboard_strokes(course_id, slot_id, sender_id, kind, data) VALUES (?, ?, ?, 'undo', ?)",
@@ -3218,119 +3839,149 @@ def visio_tableau_annuler(course_id, slot_id):
 
 
 @app.route("/cours/<int:course_id>/slots/<int:slot_id>/visio/tableau/recevoir")
-@login_required()
+@login_required(role=("prof", "etudiant"))
 def visio_tableau_recevoir(course_id, slot_id):
-    """Poll des traits (et effacements) du tableau blanc partagé apparus
-    depuis `since`, pour resynchronisation continue entre les deux
-    participants (y compris un participant qui vient de rejoindre : il
-    récupère alors tout l'historique depuis since=0)."""
-    user = current_user()
-    course, slot, partner_id = get_course_and_partner(course_id, slot_id, user)
-    if not course or not slot or not partner_id:
-        return jsonify({"error": "accès refusé"}), 403
-
-    since = request.args.get("since", 0, type=int)
-    db = get_db()
-    rows = db.execute(
-        """
-        SELECT * FROM whiteboard_strokes
-        WHERE course_id = ? AND slot_id = ? AND id > ?
-        ORDER BY id ASC
-        """,
-        (course_id, slot_id, since),
+    user, slot, partner_id, error = visio_json_guard(course_id, slot_id)
+    if error:
+        return error
+    rows = get_db().execute(
+        "SELECT * FROM whiteboard_strokes WHERE slot_id = ? AND id > ? ORDER BY id LIMIT 2000",
+        (slot_id, request.args.get("since", 0, type=int)),
     ).fetchall()
-    return jsonify(
-        {
-            "strokes": [
-                {
-                    "id": r["id"],
-                    "kind": r["kind"],
-                    "sender_id": r["sender_id"],
-                    "data": json.loads(r["data"]),
-                }
-                for r in rows
-            ]
-        }
-    )
+    return jsonify({"strokes": [
+        {"id": r["id"], "kind": r["kind"], "sender_id": r["sender_id"], "data": json.loads(r["data"])} for r in rows
+    ]})
 
 
 # ---------------------------------------------------------------------------
-# Routes — Paramètres (changement de mot de passe)
+# Paramètres du compte : mot de passe, export, suppression
 # ---------------------------------------------------------------------------
 @app.route("/parametres", methods=["GET", "POST"])
 @login_required()
 def parametres():
     user = current_user()
     if request.method == "POST":
-        if is_rate_limited(f"pwdchange:{user['id']}", max_attempts=10, window_seconds=600):
+        if is_rate_limited(f"pwdchange:{user['id']}", 10, 900):
             flash("Trop de tentatives. Réessayez dans quelques minutes.", "error")
             return render_template("parametres.html", user=user), 429
-
         current_password = request.form.get("current_password", "")
         new_password = request.form.get("new_password", "")
-        confirm_password = request.form.get("confirm_password", "")
-
-        if not check_password_hash(user["password_hash"], current_password):
+        if not check_password_hash(user["password_hash"], current_password[:MAX_PASSWORD_LENGTH + 1]):
             flash("Mot de passe actuel incorrect.", "error")
             return render_template("parametres.html", user=user)
-        if not (8 <= len(new_password) <= MAX_PASSWORD_LENGTH):
-            flash(f"Le nouveau mot de passe doit contenir entre 8 et {MAX_PASSWORD_LENGTH} caractères.", "error")
+        problem = password_problem(new_password)
+        if problem:
+            flash(problem, "error")
             return render_template("parametres.html", user=user)
-        if new_password != confirm_password:
-            flash("Les deux mots de passe saisis ne correspondent pas.", "error")
+        if new_password != request.form.get("confirm_password", ""):
+            flash("Les deux mots de passe ne correspondent pas.", "error")
             return render_template("parametres.html", user=user)
-
+        if new_password == current_password:
+            flash("Choisissez un mot de passe différent de l'actuel.", "error")
+            return render_template("parametres.html", user=user)
         db = get_db()
-        db.execute(
-            "UPDATE users SET password_hash = ? WHERE id = ?",
-            (generate_password_hash(new_password), user["id"]),
-        )
+        new_hash = generate_password_hash(new_password)
+        db.execute("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", (new_hash, user["id"]))
+        audit(db, "changement_mot_de_passe", target=f"user:{user['id']}")
         db.commit()
-        flash("Mot de passe mis à jour avec succès.", "success")
+        session["auth_fp"] = auth_fingerprint(new_hash)  # les autres sessions sont déconnectées
+        flash("Mot de passe modifié. Vos autres sessions ont été déconnectées.", "success")
         return redirect(url_for("parametres"))
-
     return render_template("parametres.html", user=user)
 
 
-@app.route("/admin/utilisateurs/<int:user_id>/reinitialiser-mot-de-passe", methods=["POST"])
-@login_required(role="admin")
-def admin_reinitialiser_mot_de_passe(user_id):
-    """Permet à l'administrateur de réinitialiser le mot de passe d'un
-    professeur ou d'un élève qui ne peut plus se connecter (mot de passe
-    oublié). Un nouveau mot de passe temporaire est généré et affiché une
-    seule fois à l'admin, à transmettre à l'utilisateur concerné."""
-    db = get_db()
-    target = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-    if not target:
-        flash("Utilisateur introuvable.", "error")
-        return redirect(url_for("admin_dashboard"))
-    if target["role"] == "admin":
-        flash("Impossible de réinitialiser le mot de passe d'un compte administrateur.", "error")
-        return redirect(url_for("admin_dashboard"))
+def rows_to_dicts(rows):
+    return [dict(r) for r in rows]
 
-    new_password = secrets.token_urlsafe(6)
-    db.execute(
-        "UPDATE users SET password_hash = ? WHERE id = ?",
-        (generate_password_hash(new_password), user_id),
-    )
-    db.commit()
-    flash(
-        f"Nouveau mot de passe temporaire pour {target['name']} ({target['email']}) : {new_password} "
-        "— transmettez-le-lui, il pourra le changer ensuite dans ses Paramètres.",
-        "success",
-    )
-    return redirect(url_for("admin_dashboard"))
+
+@app.route("/parametres/mes-donnees")
+@login_required()
+def exporter_donnees():
+    """Droit d'accès et à la portabilité (RGPD, art. 15 et 20)."""
+    db = get_db()
+    user = current_user()
+    uid = user["id"]
+    profile = {k: user[k] for k in user.keys() if k not in ("password_hash",)}
+    data = {
+        "export_genere_le": utc_now_str() + " UTC",
+        "profil": profile,
+        "cours_publies": rows_to_dicts(db.execute("SELECT * FROM courses WHERE teacher_id = ?", (uid,)).fetchall()),
+        "creneaux_reserves": rows_to_dicts(db.execute("SELECT * FROM slots WHERE reserved_by = ?", (uid,)).fetchall()),
+        "commandes": rows_to_dicts(db.execute(
+            "SELECT * FROM orders WHERE student_id = ? OR teacher_id = ?", (uid, uid)
+        ).fetchall()),
+        "messages": rows_to_dicts(db.execute(
+            "SELECT id, sender_id, recipient_id, body, created_at, read_at, attachment_original_name FROM messages "
+            "WHERE sender_id = ? OR recipient_id = ?", (uid, uid)
+        ).fetchall()),
+        "notes_donnees": rows_to_dicts(db.execute("SELECT teacher_id, rating, created_at FROM ratings WHERE student_id = ?", (uid,)).fetchall()),
+        "signalements": rows_to_dicts(db.execute("SELECT * FROM reports WHERE reporter_id = ?", (uid,)).fetchall()),
+    }
+    buf = BytesIO(json.dumps(data, ensure_ascii=False, indent=2, default=str).encode("utf-8"))
+    return send_file(buf, mimetype="application/json", as_attachment=True, download_name="mes-donnees.json")
+
+
+@app.route("/parametres/supprimer-compte", methods=["POST"])
+@login_required(role=("prof", "etudiant"))
+def supprimer_compte():
+    db = get_db()
+    user = current_user()
+    if is_rate_limited(f"delete:{user['id']}", 5, 900):
+        flash("Trop de tentatives. Réessayez plus tard.", "error")
+        return redirect(url_for("parametres"))
+    if not check_password_hash(user["password_hash"], request.form.get("password", "")[:MAX_PASSWORD_LENGTH + 1]):
+        flash("Mot de passe incorrect : le compte n'a pas été supprimé.", "error")
+        return redirect(url_for("parametres"))
+    try:
+        erase_user(db, user, "demande de l'utilisateur", actor_id=user["id"], force_refunds=False)
+        db.commit()
+    except PaymentError as exc:
+        db.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("parametres"))
+    session.clear()
+    flash("Votre compte a été supprimé.", "success")
+    return redirect(url_for("presentation"))
+
+
+# ---------------------------------------------------------------------------
+# Erreurs
+# ---------------------------------------------------------------------------
+@app.errorhandler(CSRFError)
+def handle_csrf_error(exc):
+    if request.is_json or request.path.startswith("/cours/") and "/visio/" in request.path:
+        return jsonify({"error": "jeton de sécurité invalide"}), 400
+    flash("La page a expiré. Rechargez-la puis recommencez.", "error")
+    return redirect_back(url_for("presentation"))
+
+
+@app.errorhandler(413)
+def handle_too_large(exc):
+    flash("Fichier trop volumineux (8 Mo maximum).", "error")
+    return redirect_back(url_for("presentation"))
+
+
+@app.errorhandler(400)
+@app.errorhandler(403)
+@app.errorhandler(404)
+@app.errorhandler(405)
+@app.errorhandler(429)
+@app.errorhandler(500)
+def handle_http_error(exc):
+    code = getattr(exc, "code", 500) or 500
+    titles = {400: "Requête invalide", 403: "Accès refusé", 404: "Page introuvable", 405: "Action non autorisée",
+              429: "Trop de requêtes", 500: "Erreur du serveur"}
+    if request.path.startswith("/cours/") and "/visio/" in request.path:
+        return jsonify({"error": titles.get(code, "erreur")}), code
+    return render_template("erreur.html", code=code, title=titles.get(code, "Erreur")), code
 
 
 # ---------------------------------------------------------------------------
 init_db()
-start_auto_release_background_thread()
+if not os.environ.get("DISABLE_MAINTENANCE_THREAD"):
+    start_maintenance_thread()
 
 if __name__ == "__main__":
-    # FAILLE CORRIGÉE : debug=True active le débogueur interactif Werkzeug,
-    # qui permet d'exécuter du code Python arbitraire depuis le navigateur
-    # si la page d'erreur est atteignable (exécution de code à distance).
-    # Le mode debug ne doit être activé qu'explicitement en développement
-    # local via la variable d'environnement FLASK_DEBUG=1.
-    debug_mode = os.environ.get("FLASK_DEBUG", "0") == "1"
-    app.run(debug=debug_mode)
+    # Le débogueur Werkzeug permet d'exécuter du code depuis le navigateur :
+    # il n'est activé qu'explicitement (FLASK_DEBUG=1), jamais en production.
+    app.run(debug=os.environ.get("FLASK_DEBUG", "0") == "1")

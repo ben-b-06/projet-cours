@@ -1,136 +1,119 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{% block title %}la communauté du savoir{% endblock %}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,500&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<title>{% block title %}{{ SITE_NAME }}{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<script src="{{ url_for('static', filename='site.js') }}"></script>
+{% block head %}{% endblock %}
 </head>
 <body>
-{% from '_macros.html' import icon %}
+{% set ep = request.endpoint %}
+{% macro navlink(endpoint, label, also=()) -%}
+<li><a href="{{ url_for(endpoint) }}"{% if ep == endpoint or ep in also %} aria-current="page"{% endif %}>{{ label }}</a></li>
+{%- endmacro %}
+<a class="skip" href="#contenu">Aller au contenu</a>
 
-<button class="mobile-toggle" id="mobileToggle">{{ icon('menu') }} Menu</button>
-
-<div class="app-shell">
-<aside class="sidebar" id="sidebar">
-<div class="brand"><span class="brand-mark"></span>la communauté du savoir</div>
-
-<ul class="tree">
-<li>
-<span class="tree-group">Accueil</span>
-<ul>
-<li><a class="tree-link {{ 'active' if request.endpoint=='presentation' else '' }}" href="{{ url_for('presentation') }}"><span class="dot"></span>Présentation</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='cours' else '' }}" href="{{ url_for('cours') }}"><span class="dot"></span>Cours disponible ( liste )</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='cours_calendrier' else '' }}" href="{{ url_for('cours_calendrier') }}"><span class="dot"></span>Cours disponible ( calendrier )</a></li>
-</ul>
-</li>
-
-{% if not current_user %}
-<li>
-<span class="tree-group">Authentification</span>
-<ul>
-<li><a class="tree-link {{ 'active' if request.endpoint=='connexion' else '' }}" href="{{ url_for('connexion') }}"><span class="dot"></span>Connexion</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='inscription' else '' }}" href="{{ url_for('inscription') }}"><span class="dot"></span>Inscription</a></li>
-</ul>
-</li>
-{% endif %}
-
-{% if current_user and current_user['role'] == 'prof' %}
-<li>
-<span class="tree-group">Professeur</span>
-<ul>
-<li><a class="tree-link {{ 'active' if request.endpoint=='prof_dashboard' else '' }}" href="{{ url_for('prof_dashboard') }}"><span class="dot"></span>Tableau de bord{% if current_user %} {% endif %}</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='portefeuille' else '' }}" href="{{ url_for('portefeuille') }}"><span class="dot"></span>Mon portefeuille{% if current_user %} ({{ current_user['wallet_cents']|euros }}){% endif %}</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='prof_creer' else '' }}" href="{{ url_for('prof_creer') }}"><span class="dot"></span>Créer un cours</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='prof_profil' else '' }}" href="{{ url_for('prof_profil') }}"><span class="dot"></span>Mon profil</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='prof_calendrier' else '' }}" href="{{ url_for('prof_calendrier') }}"><span class="dot"></span>Calendrier</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint in ['messagerie','messagerie_conversation'] else '' }}" href="{{ url_for('messagerie') }}"><span class="dot"></span>Messagerie{% if unread_messages_total %} ({{ unread_messages_total }}){% endif %}</a></li>
-</ul>
-</li>
-{% endif %}
-
-{% if current_user and current_user['role'] == 'etudiant' %}
-<li>
-<span class="tree-group">Étudiant</span>
-<ul>
-<li><a class="tree-link {{ 'active' if request.endpoint=='etudiant' else '' }}" href="{{ url_for('etudiant') }}"><span class="dot"></span>Mes cours</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='portefeuille' else '' }}" href="{{ url_for('portefeuille') }}"><span class="dot"></span>Mon portefeuille{% if current_user %} ({{ current_user['wallet_cents']|euros }}){% endif %}</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='etudiant_calendrier' else '' }}" href="{{ url_for('etudiant_calendrier') }}"><span class="dot"></span>Calendrier</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='etudiant_profil' else '' }}" href="{{ url_for('etudiant_profil') }}"><span class="dot"></span>Mon profil</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint in ['messagerie','messagerie_conversation'] else '' }}" href="{{ url_for('messagerie') }}"><span class="dot"></span>Messagerie{% if unread_messages_total %} ({{ unread_messages_total }}){% endif %}</a></li>
-</ul>
-</li>
-{% endif %}
-
-{% if current_user and current_user['role'] == 'admin' %}
-<li>
-<span class="tree-group">Administration</span>
-<ul>
-<li><a class="tree-link {{ 'active' if request.endpoint=='admin_dashboard' else '' }}" href="{{ url_for('admin_dashboard') }}"><span class="dot"></span>Tableau de bord</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='portefeuille' else '' }}" href="{{ url_for('portefeuille') }}"><span class="dot"></span>Mon portefeuille{% if current_user %} ({{ current_user['wallet_cents']|euros }}){% endif %}</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint=='admin_retraits' else '' }}" href="{{ url_for('admin_retraits') }}"><span class="dot"></span>Demandes de retrait{% if pending_withdrawals_total %} ({{ pending_withdrawals_total }}){% endif %}</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint in ['messagerie','messagerie_conversation'] else '' }}" href="{{ url_for('messagerie') }}"><span class="dot"></span>Contacter un utilisateur{% if unread_messages_total %} ({{ unread_messages_total }}){% endif %}</a></li>
-<li><a class="tree-link {{ 'active' if request.endpoint in ['admin_messagerie','admin_messagerie_thread'] else '' }}" href="{{ url_for('admin_messagerie') }}"><span class="dot"></span>Superviser les conversations</a></li>
-</ul>
-</li>
-{% endif %}
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="logo" href="{{ url_for('presentation') }}">{{ SITE_NAME }}</a>
+    <button type="button" class="menu-button" aria-expanded="false" aria-controls="menu-principal">Menu</button>
+    <div class="header-collapsible" id="menu-principal">
+      <nav aria-label="Navigation principale">
+        <ul class="nav">
+          {{ navlink('cours', 'Trouver un cours') }}
+          {{ navlink('cours_calendrier', 'Calendrier des cours') }}
+          {{ navlink('presentation', 'Qui sommes-nous') }}
+        </ul>
+      </nav>
+      <ul class="nav nav-account">
+        {% if current_user %}
+          {{ navlink('parametres', 'Mon compte') }}
+          <li>
+            <form method="post" action="{{ url_for('deconnexion') }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="nav-button">Se déconnecter</button>
+            </form>
+          </li>
+        {% else %}
+          {{ navlink('connexion', 'Connexion') }}
+          {{ navlink('inscription', 'Créer un compte') }}
+        {% endif %}
+      </ul>
+    </div>
+  </div>
+</header>
 
 {% if current_user %}
-<li>
-<span class="tree-group">Paramètres</span>
-<ul>
-<li><a class="tree-link {{ 'active' if request.endpoint=='parametres' else '' }}" href="{{ url_for('parametres') }}"><span class="dot"></span>Changer mon mot de passe</a></li>
-</ul>
-</li>
+<nav class="subnav" aria-label="Mon espace">
+  <div class="wrap">
+    {% if current_user['role'] == 'etudiant' %}
+      <ul class="nav">
+        {{ navlink('etudiant', 'Mes séances') }}
+        {{ navlink('etudiant_calendrier', 'Mon agenda') }}
+        {{ navlink('messagerie', 'Messages' ~ (' (' ~ unread_messages_total ~ ')' if unread_messages_total else ''), ('messagerie_conversation',)) }}
+        {{ navlink('paiements', 'Paiements') }}
+        {{ navlink('etudiant_profil', 'Profil') }}
+      </ul>
+    {% elif current_user['role'] == 'prof' %}
+      <ul class="nav">
+        {{ navlink('prof_dashboard', 'Tableau de bord') }}
+        {{ navlink('prof_creer', 'Nouveau cours') }}
+        {{ navlink('prof_calendrier', 'Agenda') }}
+        {{ navlink('messagerie', 'Messages' ~ (' (' ~ unread_messages_total ~ ')' if unread_messages_total else ''), ('messagerie_conversation',)) }}
+        {{ navlink('paiements', 'Paiements') }}
+        {{ navlink('prof_profil', 'Profil') }}
+      </ul>
+    {% elif current_user['role'] == 'admin' %}
+      <ul class="nav">
+        {{ navlink('admin_dashboard', 'Utilisateurs et cours') }}
+        {{ navlink('admin_paiements', 'Paiements') }}
+        {{ navlink('admin_signalements', 'Signalements' ~ (' (' ~ open_reports_total ~ ')' if open_reports_total else '')) }}
+        {{ navlink('messagerie', 'Messages' ~ (' (' ~ unread_messages_total ~ ')' if unread_messages_total else ''), ('messagerie_conversation',)) }}
+        {{ navlink('admin_messagerie', 'Modération', ('admin_messagerie_thread',)) }}
+        {{ navlink('admin_journal', 'Journal') }}
+      </ul>
+    {% endif %}
+  </div>
+</nav>
 {% endif %}
 
-</ul>
-
-<div class="session-box">
-{% if current_user %}
-<span class="who">{{ current_user['name'] }}</span>
-<span style="display:block;margin-bottom:0.7rem;">{{ 'Compte professeur' if current_user['role']=='prof' else ('Compte étudiant' if current_user['role']=='etudiant' else 'Compte administrateur') }}</span>
-<a class="btn-ghost-light" href="{{ url_for('deconnexion') }}">Se déconnecter</a>
-{% else %}
-<span style="display:block;margin-bottom:0.7rem;">Non connecté(e)</span>
-<a class="btn-ghost-light" href="{{ url_for('connexion') }}">Se connecter</a>
-{% endif %}
-</div>
-
-<ul class="tree">
-<li>
-<span class="tree-group">Informations légales</span>
-<ul>
-<li><a class="tree-link {{ 'active' if request.endpoint=='cgu' else '' }}" href="{{ url_for('cgu') }}"><span class="dot"></span>CGU</a></li>
-</ul>
-</li>
-</ul>
-</aside>
-
-<main class="content">
-{% with messages = get_flashed_messages(with_categories=true) %}
-{% if messages %}
-<div class="flash-stack">
-{% for category, msg in messages %}
-<div class="flash flash-{{ category }}">{{ msg }}</div>
-{% endfor %}
-</div>
-{% endif %}
-{% endwith %}
-
-{% block content %}{% endblock %}
+<main id="contenu" class="page">
+  <div class="wrap">
+    {% if legal_missing %}
+      <div class="notice notice-warn">
+        <p><strong>Informations légales incomplètes.</strong> {{ legal_missing|length }} champ(s) des mentions légales et des
+        conditions générales ne sont pas encore renseignés (variables <code>LEGAL_…</code>, voir le README).
+        Le site ne doit pas être ouvert au public tant qu'ils ne le sont pas.</p>
+      </div>
+    {% endif %}
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flashes" role="status">
+          {% for category, msg in messages %}
+            <div class="notice {{ 'notice-error' if category == 'error' else '' }}">{{ msg }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </div>
 </main>
-</div>
 
-<script>
-document.getElementById('mobileToggle').onclick = () => {
-document.getElementById('sidebar').classList.toggle('open');
-};
-document.querySelectorAll('.flash').forEach(el => {
-setTimeout(() => el.classList.add('fade'), 3200);
-});
-</script>
+<footer class="site-footer">
+  <div class="wrap">
+    <ul class="footer-links">
+      <li><a href="{{ url_for('mentions_legales') }}">Mentions légales</a></li>
+      <li><a href="{{ url_for('cgu') }}">Conditions d'utilisation</a></li>
+      <li><a href="{{ url_for('cgv') }}">Conditions de vente</a></li>
+      <li><a href="{{ url_for('confidentialite') }}">Données personnelles et cookies</a></li>
+      <li><a href="{{ url_for('signaler') }}">Signaler un contenu</a></li>
+      <li><a href="mailto:{{ LEGAL.contact_email }}">Contact</a></li>
+    </ul>
+    <p>{{ SITE_NAME }} met en relation élèves et professeurs particuliers. Les paiements sont traités par Stripe et versés directement aux professeurs.</p>
+  </div>
+</footer>
 </body>
 </html>

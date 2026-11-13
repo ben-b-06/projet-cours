@@ -1,0 +1,27 @@
+<div class="cal-nav">
+  <h2>{{ month_label }}</h2>
+  <p class="actions">
+    <a class="btn btn-secondary btn-small" href="{{ prev_link }}">Mois précédent</a>
+    <a class="btn btn-secondary btn-small" href="{{ today_link }}">Aujourd'hui</a>
+    <a class="btn btn-secondary btn-small" href="{{ next_link }}">Mois suivant</a>
+  </p>
+</div>
+<div class="calendar">
+  <div class="cal-head">{% for j in jours %}<div>{{ j }}</div>{% endfor %}</div>
+  {% for week in weeks %}
+    <div class="cal-week">
+      {% for day in week %}
+        <div class="cal-day{% if not day.in_month %} outside{% endif %}{% if day.is_today %} today{% endif %}">
+          <span class="cal-num">{{ day.date.day }}</span>
+          {% for ev in day.events %}
+            {% if ev.course_id is defined %}
+              <a class="cal-event {{ 'free' if ev.status == 'disponible' else '' }}" href="{{ url_for('cours', **(filters or {})) }}#cours-{{ ev.course_id }}" title="{{ ev.title }} · {{ ev.subtitle }}">{{ ev.time }} {{ ev.title }}</a>
+            {% else %}
+              <span class="cal-event {{ 'free' if ev.status == 'disponible' else '' }}" title="{{ ev.title }} · {{ ev.subtitle }}">{{ ev.time }} {{ ev.title }}</span>
+            {% endif %}
+          {% endfor %}
+        </div>
+      {% endfor %}
+    </div>
+  {% endfor %}
+</div>

@@ -1,25 +1,37 @@
 {% extends "base.html" %}
 {% block content %}
-  <section class="hero">
-    <span class="eyebrow">la communauté du savoir · plateforme de cours en ligne</span>
-    <h1>Des cours particuliers donnés par des étudiants, en présentiel ou à distance.</h1>
-    <p class="lead">La communauté du savoir met en relation des étudiants qui souhaitent transmettre ce qu'ils maîtrisent avec d'autres qui cherchent à progresser — en mathématiques, physique, chimie, biologie, informatique et bien d'autres matières.</p>
-    <p class="lead">Le projet est né de l'initiative de trois étudiants convaincus qu'apprendre auprès d'un pair, proche en âge et en expérience, change souvent la donne.</p>
-    <p class=" lead"> Qui sommes-nous ? </p>
-    <p class="lead">Nous sommes trois étudiants des Arts Et Metiers et de ESTP convaincus que que des cours particuliers donné par des étudiants est une méthode efficace pour progresser. Nous avons créé cette plateforme pour faciliter la mise en relation entre étudiants souhaitant partager leurs connaissances et ceux cherchant à apprendre.</p>
-    <div class="flow">
-      <span class="flow-node"><span class="dot"></span>Choisir un cours</span>
-      <span class="flow-line"></span>
-      <span class="flow-node mid"><span class="dot"></span>Réserver un créneau</span>
-      <span class="flow-line"></span>
-      <span class="flow-node"><span class="dot"></span>Suivre la séance</span>
-    </div>
-  </section>
+<div class="columns">
+  <div class="intro">
+    <h1>Des cours particuliers donnés par des étudiants</h1>
+    <p class="lead">En ligne ou en présentiel, pour les collégiens et les lycéens : mathématiques, physique-chimie, SVT, français, SES, histoire-géographie, sciences de l'ingénieur.</p>
+    <p><a class="btn" href="{{ url_for('cours') }}">Voir les cours proposés</a></p>
 
-  <div class="row-between" style="gap:0.8rem;flex-wrap:wrap;">
-    <a class="btn btn-gold" href="{{ url_for('cours') }}">Voir la liste des cours</a>
-    {% if not current_user %}
-    <a class="btn btn-outline" href="{{ url_for('inscription') }}">Créer un compte</a>
-    {% endif %}
+    <h2>Comment ça se passe</h2>
+    <ol class="steps">
+      <li>Vous choisissez un cours, puis un ou plusieurs créneaux.</li>
+      <li>Vous payez en ligne par carte. Le paiement est traité par Stripe et versé directement au professeur.</li>
+      <li>La séance a lieu en visio sur le site, ou en présentiel selon le cours.</li>
+      <li>Vous pouvez annuler gratuitement jusqu'à 12 heures avant le début ; vous êtes alors remboursé sur votre carte.</li>
+    </ol>
+
+    <h2>Qui sommes-nous ?</h2>
+    <p>Nous sommes trois étudiants des Arts et Métiers et de l'ESTP. Nous sommes convaincus que les cours particuliers donnés par des étudiants sont une méthode efficace pour progresser : apprendre auprès de quelqu'un de proche en âge et en expérience change souvent la donne.</p>
+    <p>Nous avons créé cette plateforme pour mettre en relation les étudiants qui souhaitent transmettre ce qu'ils maîtrisent et les élèves qui cherchent à progresser.</p>
   </div>
+
+  <aside>
+    <div class="box">
+      <h2>Vous êtes étudiant ?</h2>
+      <p>Proposez vos cours, fixez vos horaires et vos tarifs. Chaque profil de professeur est vérifié par l'équipe avant d'être publié.</p>
+      {% if not current_user %}
+        <p><a class="btn btn-secondary" href="{{ url_for('inscription') }}">Créer un compte professeur</a></p>
+      {% endif %}
+    </div>
+    <div class="box">
+      <h2>Pour les parents</h2>
+      <p>Le compte d'un élève mineur est créé et géré par son parent ou représentant légal, qui effectue les paiements.</p>
+      <p class="small"><a href="{{ url_for('cgu') }}#mineurs">En savoir plus sur l'encadrement des mineurs</a></p>
+    </div>
+  </aside>
+</div>
 {% endblock %}

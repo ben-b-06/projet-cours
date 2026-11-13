@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Paiements · {{ SITE_NAME }}{% endblock %}
+{% block content %}
+<h1>Mes paiements</h1>
+<p class="muted">Chaque réservation est payée par carte au moment de la réserver, sur la page sécurisée de Stripe.
+  Le site ne conserve ni votre numéro de carte ni d'argent pour votre compte. Les remboursements reviennent sur la carte utilisée,
+  en général sous 5 à 10 jours ouvrés.</p>
+
+{% if current_user['wallet_cents'] %}
+  <div class="notice notice-warn">
+    <p>Ancien porte-monnaie : il vous reste <strong>{{ current_user['wallet_cents']|euros }}</strong>. Ce système a été supprimé ;
+      ce montant vous sera restitué. Contactez <a href="mailto:{{ LEGAL.contact_email }}">{{ LEGAL.contact_email }}</a> si besoin.</p>
+  </div>
+{% endif %}
+
+{% if orders %}
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>Date</th><th>Cours</th><th>Séances</th><th class="num">Montant</th><th>État</th><th>Documents</th></tr></thead>
+      <tbody>
+      {% for o in orders %}
+        <tr>
+          <td class="nowrap">{{ o['created_at']|date_fr }}</td>
+          <td>{{ o['course_title'] }}<br><span class="small muted">{{ o['teacher_name'] }} · {{ m.teacher_status(o['teacher_status']) }}</span></td>
+          <td>
+            {% for it in items_by_order.get(o['id'], []) %}
+              <span class="nowrap">{{ it['slot_date'] }} {{ it['slot_time'] }}</span> {{ m.item_status(it['status']) }}<br>
+            {% endfor %}
+          </td>
+          <td class="num">{{ o['amount_cents']|euros }}</td>
+          <td>{{ m.order_status(o['status']) }}</td>
+          <td class="nowrap">
+            {% if o['invoice_number'] %}<a href="{{ url_for('telecharger_facture', order_id=o['id']) }}">{{ 'Facture' if o['teacher_status'] in PRO_STATUSES else 'Reçu' }}</a>{% endif %}
+            {% for it in items_by_order.get(o['id'], []) if it['credit_note_number'] %}
+              <br><a href="{{ url_for('telecharger_avoir', item_id=it['id']) }}">Avoir {{ it['credit_note_number'] }}</a>
+            {% endfor %}
+            {% if o['status'] == 'pending' %}<a href="{{ url_for('paiement_reprendre', order_id=o['id']) }}">Reprendre le paiement</a>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  <p>Aucun paiement pour le moment.</p>
+{% endif %}
+{% endblock %}

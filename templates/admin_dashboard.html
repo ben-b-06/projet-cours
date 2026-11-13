@@ -1,162 +1,100 @@
 {% extends "base.html" %}
-{% import "_macros.html" as macros %}
+{% import "_macros.html" as m %}
+{% block title %}Administration · {{ SITE_NAME }}{% endblock %}
 {% block content %}
-  <span class="eyebrow">Administration / Tableau de bord</span>
-  <h2 style="font-size:1.5rem;margin:0 0 1.6rem;">Bonjour, {{ current_user['name'] }}</h2>
+<h1>Administration</h1>
+<p class="summary-line">{{ profs|length }} professeur(s) validé(s) · {{ pending|length }} en attente · {{ students|length }} élève(s) ·
+  {{ courses|length }} cours · commissions sur séances payées : {{ fees_total|euros }}</p>
 
-  <div class="stats-row">
-    <div class="card stat-card"><div class="stat-num">{{ profs|length }}</div><div class="stat-label">Professeurs</div></div>
-    <div class="card stat-card"><div class="stat-num">{{ profs_en_attente|length }}</div><div class="stat-label">En attente de validation</div></div>
-    <div class="card stat-card"><div class="stat-num">{{ etudiants|length }}</div><div class="stat-label">Étudiants</div></div>
-    <div class="card stat-card"><div class="stat-num">{{ courses|length }}</div><div class="stat-label">Cours</div></div>
-  </div>
+{% if legacy_count %}
+  <div class="notice notice-warn"><p>Des montants de l'ancien porte-monnaie restent à solder.
+    <a href="{{ url_for('admin_anciens_soldes') }}">Voir les anciens soldes</a></p></div>
+{% endif %}
 
-  <div class="section-title" style="margin-bottom:0.8rem;"><h2>Revenus de la plateforme</h2></div>
-  <div class="card" style="padding:1.2rem 1.4rem;margin-bottom:2.2rem;">
-    <p style="color:var(--text-muted);font-size:0.88rem;margin:0 0 0.6rem;">
-      Commission prélevée sur chaque paiement versé à un professeur ({{ (admin_commission_rate * 100)|round|int }} % des transactions terminées avec succès — hors remboursements).
-    </p>
-    <div class="stats-row" style="margin:0;">
-      <div class="card stat-card"><div class="stat-num">{{ commission_total_cents|euros }}</div><div class="stat-label">Commissions perçues au total</div></div>
-      <div class="card stat-card"><div class="stat-num">{{ admin_wallet_cents|euros }}</div><div class="stat-label">Solde actuel du compte admin</div></div>
-      <a class="card stat-card" href="{{ url_for('admin_retraits') }}" style="text-decoration:none;color:inherit;{{ 'border-color:var(--gold,#c9a227);' if pending_withdrawals_count else '' }}">
-        <div class="stat-num">{{ pending_withdrawals_count }}</div><div class="stat-label">Demande(s) de retrait en attente</div>
-      </a>
-    </div>
-  </div>
+<form method="post" action="{{ url_for('admin_definir_mode_inscription') }}" class="box actions">
+  {{ m.csrf() }}
+  <strong>Inscriptions ouvertes à :</strong>
+  <label class="check"><input type="radio" name="registration_mode" value="tous"{% if registration_mode == 'tous' %} checked{% endif %}> professeurs et élèves</label>
+  <label class="check"><input type="radio" name="registration_mode" value="profs"{% if registration_mode == 'profs' %} checked{% endif %}> professeurs uniquement</label>
+  <button class="btn btn-secondary btn-small" type="submit">Appliquer</button>
+</form>
 
-  <div class="section-title" style="margin-bottom:0.8rem;"><h2>Paramètres d'inscription</h2></div>
-  <div class="card" style="padding:1.2rem 1.4rem;margin-bottom:2.2rem;">
-    <p style="color:var(--text-muted);font-size:0.88rem;margin:0 0 1rem;">
-      Choisissez qui peut créer un compte sur la plateforme.
-    </p>
-    <form method="post" action="{{ url_for('admin_definir_mode_inscription') }}" style="display:flex;flex-wrap:wrap;gap:0.7rem;align-items:center;">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <label class="slot-pick {{ 'is-mine' if registration_mode == 'profs' else '' }}" style="cursor:pointer;">
-        <input type="radio" name="registration_mode" value="profs" {{ 'checked' if registration_mode == 'profs' else '' }} onchange="this.form.requestSubmit()">
-        Professeurs uniquement
-      </label>
-      <label class="slot-pick {{ 'is-mine' if registration_mode == 'tous' else '' }}" style="cursor:pointer;">
-        <input type="radio" name="registration_mode" value="tous" {{ 'checked' if registration_mode == 'tous' else '' }} onchange="this.form.requestSubmit()">
-        Professeurs et élèves
-      </label>
-      <button class="btn btn-outline" type="submit" style="font-size:0.8rem;">Appliquer</button>
-    </form>
-  </div>
-
-  <div class="section-title"><h2>Professeurs en attente de validation</h2></div>
-  {% if profs_en_attente %}
-  <div class="course-grid">
-    {% for p in profs_en_attente %}
-    <div class="card course-card" style="border-color:var(--gold, #c9a227);">
-      <span class="course-cat">En attente de validation</span>
-      <h3>{{ p['name'] }}</h3>
-      <p class="course-desc mono" style="font-size:0.82rem;">{{ p['email'] }}</p>
-      {% if p['education_level'] %}<p class="course-desc mono" style="font-size:0.78rem;color:var(--text-muted);">{{ p['education_level'] }}</p>{% endif %}
-      <div class="course-meta">
-        <span>{{ p['course_count'] }} cours créé(s)</span>
-        <div style="display:flex;gap:0.5rem;">
-          <form method="post" action="{{ url_for('admin_valider_prof', user_id=p['id']) }}"
-                onsubmit="return confirm('Valider ce professeur ? Son profil et ses cours deviendront publics.');">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button class="btn btn-gold">Valider le profil</button>
-          </form>
-          <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=p['id']) }}"
-                onsubmit="return confirm('Supprimer ce professeur ?');">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button class="btn-danger-outline">Supprimer</button>
-          </form>
-        </div>
-      </div>
-    </div>
+<h2>Professeurs à valider</h2>
+<p class="small muted">Avant de valider un profil, vérifiez l'identité du professeur et demandez-lui un extrait de casier judiciaire (bulletin n° 3,
+  gratuit sur casier-judiciaire.justice.gouv.fr) : les élèves sont en majorité mineurs.</p>
+{% if pending %}
+  <div class="table-wrap"><table class="data">
+    <thead><tr><th>Nom</th><th>E-mail</th><th>Statut</th><th>Études</th><th>Inscrit le</th><th>Actions</th></tr></thead>
+    <tbody>
+    {% for p in pending %}
+      <tr>
+        <td>{{ p['name'] }}</td><td>{{ p['email'] }}</td><td>{{ m.teacher_status(p['teacher_status'], p['siret']) }}</td>
+        <td>{{ p['education_level'] or '—' }}</td><td class="nowrap">{{ p['created_at']|date_fr }}</td>
+        <td><div class="actions">
+          {{ m.post_button(url_for('admin_valider_prof', user_id=p['id']), 'Valider', 'btn btn-small', 'Valider ce profil ? Il deviendra public.') }}
+          {{ m.post_button(url_for('admin_supprimer_utilisateur', user_id=p['id']), 'Refuser et supprimer', 'btn btn-danger btn-small', 'Supprimer ce compte ?') }}
+        </div></td>
+      </tr>
     {% endfor %}
-  </div>
-  {% else %}
-  <div class="empty-state">Aucun professeur en attente de validation.</div>
-  {% endif %}
+    </tbody>
+  </table></div>
+{% else %}
+  <p class="muted">Aucun profil en attente.</p>
+{% endif %}
 
-  <div class="section-title" style="margin-top:2.2rem;"><h2>Professeurs validés</h2></div>
-  {% if profs %}
-  <div class="course-grid">
-    {% for p in profs %}
-    <div class="card course-card">
-      <h3>{{ p['name'] }}</h3>
-      <p class="course-desc mono" style="font-size:0.82rem;">{{ p['email'] }}</p>
-      {% if p['education_level'] %}<p class="course-desc mono" style="font-size:0.78rem;color:var(--text-muted);">{{ p['education_level'] }}</p>{% endif %}
-      <div class="course-meta">
-        <span>{{ p['course_count'] }} cours créé(s)</span>
-        <div style="display:flex;gap:0.5rem;">
-          <form method="post" action="{{ url_for('admin_reinitialiser_mot_de_passe', user_id=p['id']) }}"
-                onsubmit="return confirm('Générer un nouveau mot de passe temporaire pour ce professeur ?');">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button class="btn btn-outline">Réinitialiser le mot de passe</button>
-          </form>
-          <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=p['id']) }}"
-                onsubmit="return confirm('Supprimer ce professeur ? Tous ses cours seront aussi supprimés.');">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button class="btn-danger-outline">Supprimer</button>
-          </form>
-        </div>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
+<h2>Professeurs</h2>
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>Nom</th><th>E-mail</th><th>Statut</th><th>Paiements</th><th class="num">Cours</th><th>Actions</th></tr></thead>
+  <tbody>
+  {% for p in profs %}
+    <tr>
+      <td>{{ p['name'] }}</td><td>{{ p['email'] }}</td><td>{{ m.teacher_status(p['teacher_status'], p['siret']) }}</td>
+      <td>{% if p['stripe_charges_enabled'] %}<span class="status status-ok">activés</span>{% else %}<span class="status status-off">non</span>{% endif %}</td>
+      <td class="num">{{ p['course_count'] }}</td>
+      <td><div class="actions">
+        {{ m.post_button(url_for('admin_reinitialiser_mot_de_passe', user_id=p['id']), 'Mot de passe provisoire', 'btn btn-secondary btn-small', 'Générer un mot de passe provisoire pour ce compte ?') }}
+        {{ m.post_button(url_for('admin_supprimer_utilisateur', user_id=p['id']), 'Supprimer', 'btn btn-danger btn-small', 'Supprimer ce professeur ? Ses séances à venir seront remboursées aux élèves.') }}
+      </div></td>
+    </tr>
   {% else %}
-  <div class="empty-state">Aucun professeur pour le moment.</div>
-  {% endif %}
+    <tr><td colspan="6" class="muted">Aucun professeur.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
 
-  <div class="section-title" style="margin-top:2.2rem;"><h2>Étudiants</h2></div>
-  {% if etudiants %}
-  <div class="course-grid">
-    {% for s in etudiants %}
-    <div class="card course-card">
-      <h3>{{ s['name'] }}</h3>
-      <p class="course-desc mono" style="font-size:0.82rem;">{{ s['email'] }}</p>
-      {% if s['education_level'] %}<p class="course-desc mono" style="font-size:0.78rem;color:var(--text-muted);">Classe : {{ s['education_level'] }}</p>{% endif %}
-      <div class="course-meta">
-        <span>{{ s['course_count'] }} créneau(x) réservé(s)</span>
-        <div style="display:flex;gap:0.5rem;">
-          <form method="post" action="{{ url_for('admin_reinitialiser_mot_de_passe', user_id=s['id']) }}"
-                onsubmit="return confirm('Générer un nouveau mot de passe temporaire pour cet élève ?');">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button class="btn btn-outline">Réinitialiser le mot de passe</button>
-          </form>
-          <form method="post" action="{{ url_for('admin_supprimer_utilisateur', user_id=s['id']) }}"
-                onsubmit="return confirm('Supprimer cet étudiant ?');">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button class="btn-danger-outline">Supprimer</button>
-          </form>
-        </div>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
+<h2>Élèves et parents</h2>
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>Nom</th><th>E-mail</th><th>Classe</th><th class="num">Réservations</th><th>Actions</th></tr></thead>
+  <tbody>
+  {% for s in students %}
+    <tr>
+      <td>{{ s['name'] }}</td><td>{{ s['email'] }}</td><td>{{ s['education_level'] or '—' }}</td><td class="num">{{ s['booking_count'] }}</td>
+      <td><div class="actions">
+        {{ m.post_button(url_for('admin_reinitialiser_mot_de_passe', user_id=s['id']), 'Mot de passe provisoire', 'btn btn-secondary btn-small', 'Générer un mot de passe provisoire pour ce compte ?') }}
+        {{ m.post_button(url_for('admin_supprimer_utilisateur', user_id=s['id']), 'Supprimer', 'btn btn-danger btn-small', 'Supprimer ce compte ? Ses séances à venir seront remboursées.') }}
+      </div></td>
+    </tr>
   {% else %}
-  <div class="empty-state">Aucun étudiant pour le moment.</div>
-  {% endif %}
+    <tr><td colspan="5" class="muted">Aucun élève.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
 
-  <div class="section-title" style="margin-top:2.2rem;"><h2>Tous les cours</h2></div>
-  {% if courses %}
-  <div class="course-grid">
-    {% for c in courses %}
-    <div class="card course-card">
-      <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
-      <h3>{{ c['title'] }}</h3>
-      <p class="course-desc">{{ c['description'] }}</p>
-      {% set course_slots = slots_map.get(c['id'], []) %}
-      {{ macros.slot_list(course_slots) }}
-      <div class="course-meta">
-        <span>Par {{ c['teacher_name'] }} · {{ course_slots|selectattr('reserved_by')|list|length }} / {{ course_slots|length }} créneau(x) réservé(s)</span>
-        <form method="post" action="{{ url_for('admin_supprimer_cours', course_id=c['id']) }}"
-              onsubmit="return confirm('Supprimer ce cours ?');">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button class="btn-danger-outline">Supprimer</button>
-        </form>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
+<h2>Cours</h2>
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>Cours</th><th>Professeur</th><th class="num">Prix</th><th class="num">Créneaux réservés</th><th></th></tr></thead>
+  <tbody>
+  {% for c in courses %}
+    <tr>
+      <td>{{ c['title'] }}<br><span class="small muted">{{ c['subject'] }} · {{ c['level'] }}</span></td>
+      <td>{{ c['teacher_name'] }}</td>
+      <td class="num">{{ c['price_cents']|euros }}</td>
+      <td class="num">{{ c['reserved_count'] }}/{{ c['slot_count'] }}</td>
+      <td>{{ m.post_button(url_for('admin_supprimer_cours', course_id=c['id']), 'Retirer', 'btn btn-danger btn-small', 'Retirer ce cours ? Les séances à venir seront remboursées.') }}</td>
+    </tr>
   {% else %}
-  <div class="empty-state">Aucun cours pour le moment.</div>
-  {% endif %}
+    <tr><td colspan="5" class="muted">Aucun cours.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
 {% endblock %}

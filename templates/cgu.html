@@ -1,151 +1,113 @@
 {% extends "base.html" %}
-{% block title %}CGU — CoursConnect{% endblock %}
+{% block title %}Conditions générales d'utilisation · {{ SITE_NAME }}{% endblock %}
 {% block content %}
-  <div class="section-title">
-    <div>
-      <span class="eyebrow">Informations légales</span>
-      <h2>Conditions Générales d'Utilisation</h2>
-    </div>
-  </div>
+<div class="prose">
+  <h1>Conditions générales d'utilisation</h1>
+  <p class="updated">Version du {{ TERMS_DATE }}.</p>
 
-  <div class="card" style="padding:1.6rem 1.8rem;max-width:820px;">
-    <p class="course-desc" style="margin-bottom:1.2rem;">
-      Dernière mise à jour : 25/08/2026
-    </p>
+  <h2>1. Objet</h2>
+  <p>Les présentes conditions encadrent l'utilisation du site {{ SITE_NAME }} (« la plateforme »), édité par {{ LEGAL.editor_name }}
+    (voir les <a href="{{ url_for('mentions_legales') }}">mentions légales</a>). La plateforme met en relation des professeurs particuliers
+    et des élèves du collège et du lycée, ou leurs représentants légaux. La réservation et le paiement des séances sont régis par les
+    <a href="{{ url_for('cgv') }}">conditions générales de vente</a>.</p>
+  <p>La création d'un compte vaut acceptation des présentes conditions. Les visiteurs non inscrits peuvent consulter les cours sans compte.</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">1. Objet</h3>
-    <p class="course-desc">
-      Les présentes Conditions Générales d'Utilisation (CGU) ont pour objet de définir les modalités d'accès et d'utilisation de la plateforme CoursConnect, qui met en relation des professeurs indépendants et des élèves, ou leurs représentants légaux, souhaitant bénéficier de cours particuliers.
-    </p>
-    <p class="course-desc">
-      L'utilisation de la plateforme implique l'acceptation pleine et entière des présentes CGU.
-    </p>
+  <h2>2. Définitions</h2>
+  <ul>
+    <li><strong>Professeur</strong> : personne qui propose des cours sur la plateforme, à titre particulier ou professionnel.</li>
+    <li><strong>Élève</strong> : personne qui suit les cours. Le <strong>titulaire du compte élève</strong> est l'élève majeur ou, pour un élève mineur, son parent ou représentant légal.</li>
+    <li><strong>Séance</strong> : créneau de cours réservé par un élève auprès d'un professeur.</li>
+  </ul>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">2. Définitions</h3>
-    <p class="course-desc">
-      <strong>Plateforme</strong> : le site internet de la communauté du savoir et l'ensemble de ses fonctionnalités.<br>
-      <strong>Professeur</strong> : toute personne proposant des cours particuliers via la plateforme.<br>
-      <strong>Élève</strong> : toute personne recherchant des cours particuliers.<br>
-      <strong>Utilisateur</strong> : toute personne utilisant la plateforme, qu'elle soit professeur, élève ou simple visiteur.
-    </p>
+  <h2>3. Inscription et compte</h2>
+  <p>L'inscription est gratuite. Tout compte doit être créé par une personne majeure. L'utilisateur fournit des informations exactes
+    et les tient à jour ; il ne crée qu'un seul compte et garde son mot de passe confidentiel. Il est responsable de l'usage de son compte.</p>
+  <p>Les comptes de professeur sont vérifiés par l'équipe avant d'être visibles. L'équipe peut demander un justificatif d'identité
+    et, compte tenu du jeune âge des élèves, un extrait de casier judiciaire (bulletin n° 3). Elle peut refuser un profil.</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">3. Inscription</h3>
-    <p class="course-desc">
-      L'inscription est gratuite. L'utilisateur s'engage à fournir des informations exactes, complètes et à jour.
-      Il s'engage également à maintenir ces informations actualisées pendant toute la durée d'utilisation de la plateforme.
-    </p>
-    <p class="course-desc">
-      Les mineurs doivent être inscrits avec l'autorisation de leur représentant légal. Chaque utilisateur ne peut créer qu'un seul compte.
-    </p>
+  <h2 id="mineurs">4. Élèves mineurs</h2>
+  <p>Le compte d'un élève mineur est ouvert, géré et payé par son parent ou représentant légal, qui accepte les présentes conditions
+    pour lui et reste responsable de son utilisation. Il est recommandé qu'un adulte soit présent ou joignable pendant les séances, en particulier en présentiel.</p>
+  <p>Le professeur s'interdit de demander à un élève mineur ses coordonnées personnelles ou de communiquer avec lui en dehors de la plateforme
+    sans l'accord de son représentant légal, et de proposer une séance dans un lieu non convenu avec ce dernier.
+    Tout comportement inapproprié envers un mineur entraîne la fermeture immédiate du compte et, le cas échéant, un signalement aux autorités.</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">4. Fonctionnement de la plateforme</h3>
-    <p class="course-desc">
-      La plateforme permet la création de profils enseignants, la recherche de professeurs selon différents critères, la prise de contact entre professeurs et élèves, ainsi que la réservation éventuelle de cours si cette fonctionnalité est proposée.
-    </p>
-    <p class="course-desc">
-      La plateforme agit uniquement comme intermédiaire entre les utilisateurs et n'est pas partie aux relations contractuelles conclues entre eux.
-    </p>
+  <h2>5. Rôle de la plateforme</h2>
+  <p>La plateforme est un intermédiaire. Le contrat de cours est conclu directement entre le professeur et le titulaire du compte élève ;
+    la plateforme n'y est pas partie et ne garantit ni les résultats scolaires ni la qualité pédagogique des cours.</p>
+  <p><strong>Informations sur le fonctionnement</strong> (article L. 111-7 du Code de la consommation) :</p>
+  <ul>
+    <li>Les cours sont classés du plus récemment publié au plus ancien. Les filtres (matière, classe, modalité, ville, professeur, note)
+      ne font qu'exclure des résultats. Aucun professeur ne paie pour être mieux classé et aucun lien capitalistique n'existe entre la plateforme et les professeurs.</li>
+    <li>Pour chaque professeur, la plateforme indique s'il agit comme <strong>particulier</strong> ou comme <strong>professionnel</strong>
+      (micro-entrepreneur). Avec un professeur particulier, les règles protectrices du droit de la consommation, notamment le droit de rétractation,
+      ne s'appliquent pas au contrat de cours.</li>
+    <li>La plateforme se rémunère par une commission de {{ PLATFORM_FEE_PERCENT }} % sur chaque séance payée, prélevée sur la somme revenant au professeur.
+      L'élève ne paie aucun frais supplémentaire.</li>
+  </ul>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">5. Obligations des professeurs</h3>
-    <p class="course-desc">
-      Le professeur s'engage à fournir des informations exactes, complètes et à jour concernant son identité, ses qualifications, ses compétences et son expérience professionnelle.
-    </p>
-    <p class="course-desc">
-      Il s'engage à respecter les horaires et les engagements pris avec les élèves ou leurs représentants légaux, à dispenser les cours avec sérieux, professionnalisme, diligence et dans le respect des règles de déontologie applicables, ainsi qu'à respecter l'ensemble des lois et réglementations en vigueur dans le cadre de son activité.
-    </p>
-    <p class="course-desc">
-      Le professeur demeure seul responsable du contenu pédagogique de son enseignement, de la qualité des prestations qu'il dispense ainsi que de ses obligations fiscales, sociales et administratives liées à son activité.
-    </p>
-    <p class="course-desc">
-      Le professeur s'engage également à ne pas contourner la plateforme en concluant directement des prestations avec les élèves mis en relation via celle-ci lorsque les présentes CGU ou les conditions commerciales de la plateforme l'interdisent.
-    </p>
+  <h2>6. Avis</h2>
+  <p>Seul un élève ayant suivi au moins une séance confirmée avec un professeur peut le noter, une seule fois (la note peut être modifiée).
+    Les avis ne sont ni achetés ni rémunérés. La plateforme affiche la moyenne et le nombre d'avis ; elle ne retire une note que si elle est
+    frauduleuse ou illicite (article L. 111-7-2 du Code de la consommation).</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">6. Obligations des élèves</h3>
-    <p class="course-desc">
-      L'élève s'engage à fournir des informations exactes lors de son inscription, à respecter les rendez-vous convenus, à adopter un comportement respectueux envers les professeurs et à régler les sommes dues selon les modalités prévues.
-    </p>
+  <h2>7. Obligations des professeurs</h2>
+  <ul>
+    <li>Donner des informations exactes sur son identité, son statut, ses études et ses compétences.</li>
+    <li>Assurer les séances réservées avec sérieux et ponctualité, et prévenir l'élève au plus tôt en cas d'empêchement.</li>
+    <li>Respecter ses obligations fiscales et sociales. Les revenus perçus via des plateformes en ligne sont imposables ; selon leur montant
+      et leur régularité, une activité doit être déclarée (micro-entreprise). Informations : <a href="https://www.impots.gouv.fr" rel="noopener">impots.gouv.fr</a>
+      et <a href="https://www.urssaf.fr" rel="noopener">urssaf.fr</a>. La plateforme adresse chaque année au professeur un récapitulatif des sommes perçues
+      et transmet ces informations à l'administration fiscale (article 242 bis du Code général des impôts).</li>
+    <li>Ne pas demander de paiement en dehors de la plateforme pour une séance réservée sur celle-ci.</li>
+  </ul>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">7. Paiement</h3>
-    <p class="course-desc">
-      Lorsque les paiements sont réalisés via la plateforme, les tarifs sont fixés par les professeurs, sauf indication contraire, et les paiements sont sécurisés. La plateforme peut percevoir une commission sur chaque réservation.
-    </p>
-    <p class="course-desc">
-      Lorsque les paiements sont réalisés directement entre le professeur et l'élève, la plateforme ne saurait être tenue responsable des litiges relatifs au paiement.
-    </p>
+  <h2>8. Obligations des élèves et de leurs représentants</h2>
+  <ul>
+    <li>Fournir des informations exactes et se présenter aux séances réservées, ou les annuler dans les conditions prévues.</li>
+    <li>Adopter un comportement respectueux envers les professeurs.</li>
+  </ul>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">8. Annulation</h3>
-    <p class="course-desc">
-      Les modalités d'annulation sont précisées lors de la réservation. En cas d'annulations répétées ou abusives, la plateforme pourra suspendre ou supprimer le compte concerné.
-    </p>
+  <h2>9. Messagerie et visioconférence</h2>
+  <p>La messagerie et la visioconférence sont réservées aux échanges liés aux cours. L'appel vidéo est établi directement entre les deux navigateurs ;
+    il n'est ni enregistré ni conservé par la plateforme. Il est interdit d'enregistrer une séance sans l'accord de l'autre participant
+    (et, pour un mineur, de son représentant légal).</p>
+  <p>Pour assurer la sécurité des élèves mineurs et lutter contre la fraude, l'équipe peut consulter une conversation, uniquement pour un motif précis
+    (signalement, suspicion de fraude ou de mise en danger) ; chaque consultation est journalisée. Voir la
+    <a href="{{ url_for('confidentialite') }}#messagerie">politique de confidentialité</a>.</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">9. Responsabilité</h3>
-    <p class="course-desc">
-      La plateforme est un service de mise en relation. Elle ne garantit pas la réussite scolaire de l'élève, la qualité pédagogique des cours ni la disponibilité permanente des professeurs.
-    </p>
-    <p class="course-desc">
-      Chaque utilisateur demeure responsable de ses actes, de ses propos et de ses engagements.
-    </p>
+  <h2>10. Contenus interdits et signalements</h2>
+  <p>Sont interdits notamment les contenus injurieux, diffamatoires, discriminatoires, à caractère sexuel, violents, portant atteinte à la vie privée
+    ou aux droits d'autrui, ainsi que les coordonnées bancaires et les demandes de paiement hors plateforme.</p>
+  <p>Toute personne peut signaler un contenu au moyen du <a href="{{ url_for('signaler') }}">formulaire de signalement</a>. Les signalements sont
+    examinés avec diligence et objectivité. L'auteur du signalement et la personne concernée sont informés de la décision prise et de ses motifs ;
+    ils peuvent la contester en écrivant à <a href="mailto:{{ LEGAL.contact_email }}">{{ LEGAL.contact_email }}</a>
+    (règlement (UE) 2022/2065 sur les services numériques).</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">10. Contenus publiés</h3>
-    <p class="course-desc">
-      Les utilisateurs sont responsables des contenus qu'ils publient. Sont notamment interdits les contenus diffamatoires, injurieux, discriminatoires, illicites ou portant atteinte aux droits d'autrui.
-    </p>
-    <p class="course-desc">
-      La plateforme peut supprimer tout contenu ne respectant pas ces règles.
-    </p>
+  <h2>11. Suspension et fermeture de compte</h2>
+  <p>En cas de manquement aux présentes conditions, de fraude, d'usurpation d'identité ou de comportement inapproprié, l'équipe peut retirer un contenu,
+    suspendre ou fermer un compte. Sauf urgence (danger pour un mineur, fraude), l'utilisateur est informé au préalable des motifs et peut présenter
+    ses observations. Les séances à venir payées sont alors remboursées.</p>
+  <p>L'utilisateur peut fermer son compte à tout moment depuis la page « Mon compte ».</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">11. Suspension du compte</h3>
-    <p class="course-desc">
-      La plateforme peut suspendre ou supprimer un compte notamment en cas de fraude, de non-respect des présentes CGU, d'usurpation d'identité ou de comportement inapproprié envers les autres utilisateurs.
-    </p>
+  <h2>12. Données personnelles</h2>
+  <p>Voir la <a href="{{ url_for('confidentialite') }}">politique de confidentialité et de cookies</a>.</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">12. Propriété intellectuelle</h3>
-    <p class="course-desc">
-      Tous les éléments composant la plateforme, notamment les textes, images, logos, graphismes, logiciels et bases de données, sont protégés par les lois relatives à la propriété intellectuelle. Toute reproduction, diffusion ou utilisation sans autorisation est interdite.
-    </p>
+  <h2>13. Disponibilité et responsabilité</h2>
+  <p>La plateforme s'efforce d'assurer un accès continu au service, sans pouvoir le garantir (maintenance, incident, force majeure).
+    Chaque utilisateur est responsable des contenus qu'il publie et de ses engagements envers les autres utilisateurs.</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">13. Données personnelles</h3>
-    <p class="course-desc">
-      La plateforme collecte uniquement les données nécessaires à son fonctionnement. Les données sont traitées conformément à la réglementation applicable en matière de protection des données personnelles.
-    </p>
-    <p class="course-desc">
-      Les utilisateurs disposent notamment d'un droit d'accès, de rectification, d'effacement et d'opposition, dans les conditions prévues par la réglementation.
-    </p>
+  <h2>14. Modification des conditions</h2>
+  <p>Les présentes conditions peuvent évoluer. Les utilisateurs sont informés de toute modification importante au moins 15 jours avant son entrée
+    en vigueur ; les réservations déjà effectuées restent régies par la version acceptée lors de la réservation.</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">14. Disponibilité du service</h3>
-    <p class="course-desc">
-      La plateforme s'efforce d'assurer un accès continu au service. Toutefois, elle ne peut garantir une disponibilité permanente et pourra interrompre temporairement le service pour maintenance ou en cas de force majeure.
-    </p>
+  <h2>15. Droit applicable et litiges</h2>
+  <p>Les présentes conditions sont soumises au droit français. En cas de litige, une solution amiable est recherchée en priorité
+    (<a href="mailto:{{ LEGAL.contact_email }}">{{ LEGAL.contact_email }}</a>). Le consommateur peut recourir gratuitement au médiateur de la consommation
+    indiqué dans les <a href="{{ url_for('cgv') }}#mediation">conditions générales de vente</a>. À défaut, les tribunaux français sont compétents ;
+    le consommateur peut saisir la juridiction du lieu où il demeurait au moment de la conclusion du contrat.</p>
 
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">15. Modification des CGU</h3>
-    <p class="course-desc">
-      La plateforme se réserve le droit de modifier les présentes CGU à tout moment. Les nouvelles conditions seront applicables dès leur publication sur le site.
-    </p>
-
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">16. Droit applicable</h3>
-    <p class="course-desc">
-      Les présentes CGU sont soumises au droit applicable dans le pays où est établie la société exploitant la plateforme. Tout litige relèvera des juridictions compétentes.
-    </p>
-
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">17. Contact</h3>
-    <p class="course-desc">
-      Pour toute question relative aux présentes CGU, les utilisateurs peuvent contacter :
-      <br>
-      la communauté du savoir      
-      <br>
-      E-mail : lacommunautedusavoir1@gmail.com
-      
-    </p>
-
-    <h3 style="font-size:1.02rem;margin:1.2rem 0 0.5rem;">18. Contrôle des contenus et des communications</h3>
-    <p class="course-desc">
-      Afin d'assurer le respect des présentes CGU, la plateforme se réserve le droit d'accéder, de consulter et, le cas échéant, de modérer les contenus publiés ainsi que les messages échangés entre les utilisateurs via les outils de communication intégrés à la plateforme.
-    </p>
-    <p class="course-desc">
-      Cet accès est exercé uniquement dans la mesure nécessaire pour assurer la sécurité des utilisateurs, prévenir les fraudes, détecter les comportements contraires aux présentes CGU, répondre aux obligations légales ou réglementaires et garantir le bon fonctionnement de la plateforme.
-    </p>
-    <p class="course-desc">
-      Les utilisateurs sont informés que les communications effectuées par l'intermédiaire de la plateforme ne sont pas considérées comme privées vis-à-vis de l'exploitant de celle-ci et peuvent être consultées dans les conditions prévues au présent article, dans le respect de la législation applicable en matière de protection des données personnelles.
-    </p>
-  </div>
+  <h2>16. Contact</h2>
+  <p>{{ LEGAL.editor_name }} · <a href="mailto:{{ LEGAL.contact_email }}">{{ LEGAL.contact_email }}</a> · {{ LEGAL.editor_address }}</p>
+</div>
 {% endblock %}
