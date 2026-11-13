@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Paiements · Administration{% endblock %}
+{% block content %}
+<h1>Paiements</h1>
+<p class="summary-line">Séances payées en cours de validité : {{ totals['gross']|euros }} encaissés pour le compte des professeurs,
+  dont {{ totals['fees']|euros }} de commissions.</p>
+<p class="small muted">Les fonds sont détenus par Stripe sur les comptes des professeurs. Un remboursement reprend automatiquement
+  le montant sur le compte Stripe du professeur et annule la commission correspondante.</p>
+
+{% if orders %}
+  <div class="table-wrap"><table class="data">
+    <thead><tr><th>N°</th><th>Date</th><th>Élève</th><th>Professeur</th><th>Cours</th><th>Séances</th><th>État</th></tr></thead>
+    <tbody>
+    {% for o in orders %}
+      <tr{% if o['disputed'] %} class="highlight"{% endif %}>
+        <td>{{ o['id'] }}{% if o['disputed'] %}<br><span class="status status-bad">Litige bancaire</span>{% endif %}</td>
+        <td class="nowrap">{{ o['created_at']|date_fr }}</td>
+        <td>{{ o['student_name'] }}</td>
+        <td>{{ o['teacher_name'] }}</td>
+        <td>{{ o['course_title'] }}{% if o['invoice_number'] %}<br><a class="small" href="{{ url_for('telecharger_facture', order_id=o['id']) }}">{{ o['invoice_number'] }}</a>{% endif %}</td>
+        <td>
+          {% for it in items_by_order.get(o['id'], []) %}
+            <div class="actions">
+              <span class="nowrap">{{ it['slot_date'] }} {{ it['slot_time'] }} · {{ it['amount_cents']|euros }}</span> {{ m.item_status(it['status']) }}
+              {% if it['status'] in ('paid', 'free') %}
+                <form method="post" action="{{ url_for('admin_rembourser', item_id=it['id']) }}" class="inline"
+                      data-confirm="Rembourser intégralement cette séance à l'élève ?">
+                  {{ m.csrf() }}
+                  <input type="hidden" name="reason" value="Remboursement décidé par l'administration">
+                  <button class="link-button danger small" type="submit">{{ 'Rembourser' if it['status'] == 'paid' else 'Annuler' }}</button>
+                </form>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </td>
+        <td>{{ m.order_status(o['status']) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+{% else %}
+  <p class="muted">Aucun paiement.</p>
+{% endif %}
+{% endblock %}

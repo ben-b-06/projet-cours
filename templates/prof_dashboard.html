@@ -1,106 +1,91 @@
 {% extends "base.html" %}
-{% import "_macros.html" as macros %}
+{% import "_macros.html" as m %}
+{% block title %}Tableau de bord · {{ SITE_NAME }}{% endblock %}
 {% block content %}
-  <span class="eyebrow">Professeur / Tableau de bord</span>
+<h1>Bonjour {{ current_user['name'] }}</h1>
+<p class="summary-line">
+  {{ courses|length }} cours publié(s) · {{ upcoming|length }} séance(s) réservée(s) à venir ·
+  note moyenne : {{ m.rating(my_rating) }}
+</p>
 
-  {% if not current_user['approved'] %}
-  <div class="empty-state" style="border:1px solid var(--gold, #c9a227);margin-bottom:1.4rem;text-align:left;">
-    Votre compte est en attente de validation par l'administrateur. Votre profil et vos cours
-    ne seront visibles publiquement, et la création de cours ne sera possible, qu'une fois votre
-    profil validé.
-  </div>
-  {% endif %}
+{% if not current_user['approved'] %}
+  <div class="notice notice-warn"><p>Votre profil est en attente de validation par l'équipe. Il ne sera visible des élèves qu'après validation.
+    Complétez votre <a href="{{ url_for('prof_profil') }}">profil</a> en attendant.</p></div>
+{% endif %}
+{% if current_user['teacher_status'] not in TEACHER_STATUSES %}
+  <div class="notice notice-warn"><p>Indiquez votre statut (particulier ou micro-entrepreneur) dans votre <a href="{{ url_for('prof_profil') }}">profil</a> :
+    c'est une information obligatoire pour les élèves.</p></div>
+{% elif stripe_configured and not payments_ready %}
+  <div class="notice"><p>Pour proposer des cours payants, <a href="{{ url_for('paiements') }}">activez les paiements</a>.
+    Les élèves vous paient directement via Stripe ; le site ne détient jamais votre argent.</p></div>
+{% endif %}
 
-  <div class="row-between" style="margin-bottom:1.6rem;">
-    <div style="display:flex;align-items:center;gap:0.7rem;">
-      {{ macros.avatar(current_user['name'], current_user['photo'], 44) }}
-      <h2 style="font-size:1.5rem;margin:0;">Bonjour, {{ current_user['name'] }}</h2>
-    </div>
-    <div style="display:flex;gap:0.6rem;flex-wrap:wrap;">
-      <a class="btn btn-outline" href="{{ url_for('prof_profil') }}">Mon profil</a>
-      <a class="btn btn-outline" href="{{ url_for('prof_calendrier') }}">Voir le calendrier</a>
-      <a class="btn btn-gold" href="{{ url_for('prof_creer') }}">+ Créer un cours</a>
-    </div>
-  </div>
+<p class="actions">
+  <a class="btn" href="{{ url_for('prof_creer') }}">Publier un nouveau cours</a>
+  <a class="btn btn-secondary" href="{{ url_for('prof_calendrier') }}">Voir l'agenda</a>
+</p>
 
-  <div class="stats-row">
-    <div class="card stat-card">
-      <div class="stat-num">{{ courses|length }}</div>
-      <div class="stat-label">Cours créés</div>
-    </div>
-    <div class="card stat-card">
-      <div class="stat-num">{{ reserved_count }}</div>
-      <div class="stat-label">Créneaux réservés</div>
-    </div>
-    <div class="card stat-card">
-      {% if my_rating %}
-        <div class="stat-num">★ {{ '%.1f'|format(my_rating.avg) }}</div>
-        <div class="stat-label">Note moyenne ({{ my_rating.count }} avis)</div>
-      {% else %}
-        <div class="stat-num">—</div>
-        <div class="stat-label">Pas encore de note</div>
-      {% endif %}
-    </div>
-    <div class="card stat-card">
-      <div class="stat-num">{{ current_user['wallet_cents']|euros }}</div>
-      <div class="stat-label">Portefeuille disponible</div>
-    </div>
-    <div class="card stat-card">
-      <div class="stat-num">{{ pending_cents|euros }}</div>
-      <div class="stat-label">En séquestre (cours pas encore confirmés)</div>
-    </div>
-  </div>
-
-  <div class="section-title"><h2>Mes cours</h2></div>
-
-  {% if courses %}
-  <div class="course-grid">
-    {% for c in courses %}
-    {% set course_slots = slots_map.get(c['id'], []) %}
-    <div class="card course-card">
-      <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
-      <h3>{{ c['title'] }} <span style="font-size:0.85rem;color:var(--gold,#b8860b);font-weight:600;">— {{ c['price_cents']|euros }} / séance</span></h3>
-      <p class="course-desc">{{ c['description'] }}</p>
-      <p style="font-size:0.8rem;color:var(--text-muted);margin:-0.4rem 0 0.6rem;">
-        {% if c['mode'] == 'en_ligne' %}{{ macros.icon('video') }} En ligne
-        {% elif c['mode'] == 'presentiel' %}{{ macros.icon('pin') }} En présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
-        {% else %}{{ macros.icon('video') }}{{ macros.icon('pin') }} En ligne ou en présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
-        {% endif %}
-      </p>
-      {{ macros.slot_list(course_slots) }}
-
-      {% for s in course_slots if s['reserved_by'] %}
-        <div class="slot-contact-row">
-          <span class="badge-enrolled">{{ s['slot_date'] }} {{ s['slot_time'] }} · {{ s['student_name'] }} · {{ macros.icon('video') if s['slot_mode'] == 'en_ligne' else macros.icon('pin') }} {{ 'En ligne' if s['slot_mode'] == 'en_ligne' else 'Présentiel' }}</span>
-          {% if s['student_notes'] %}
-            <span class="mono" style="font-size:0.76rem;color:var(--text-muted);">{{ s['student_notes'] }}</span>
-          {% endif %}
-          <a class="btn btn-outline" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('messagerie_conversation', contact_id=s['reserved_by']) }}">Écrire à l'élève</a>
-          {% if s['slot_mode'] == 'en_ligne' %}
-            <a class="btn btn-sage" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('visio', course_id=c['id'], slot_id=s['id']) }}">{{ macros.icon('video') }} Visio</a>
-          {% endif %}
-          {% if c['price_cents'] and seance_terminee(s) %}
-            <a class="btn btn-outline" style="font-size:0.76rem;padding:0.35rem 0.65rem;" href="{{ url_for('telecharger_facture', slot_id=s['id']) }}">{{ macros.icon('receipt') }} Facture</a>
-          {% endif %}
-        </div>
+<h2>Prochaines séances</h2>
+{% if upcoming %}
+  <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>Date</th><th>Cours</th><th>Élève</th><th>Modalité</th><th>Paiement</th><th>Actions</th></tr></thead>
+      <tbody>
+      {% for c, s in upcoming %}
+        {% set it = item_map.get(s['id']) %}
+        <tr>
+          <td class="nowrap">{{ s|creneau_fr }}<br><span class="muted small">{{ s['duration_minutes']|duree }}</span></td>
+          <td>{{ c['title'] }}{% if s['student_notes'] %}<br><span class="small muted">Sujets : {{ s['student_notes'] }}</span>{% endif %}</td>
+          <td>{{ s['student_name'] or '—' }}</td>
+          <td>{{ 'En ligne' if s['slot_mode'] == 'en_ligne' else 'Présentiel' }}</td>
+          <td>{% if it %}{{ m.item_status(it['status']) }}{% else %}<span class="status status-off">—</span>{% endif %}</td>
+          <td>
+            <div class="actions">
+              {% if s['reservation_status'] == 'confirmed' %}
+                {% if s['slot_mode'] == 'en_ligne' %}<a class="btn btn-small" href="{{ url_for('visio', course_id=c['id'], slot_id=s['id']) }}">Visio</a>{% endif %}
+                <a class="btn btn-secondary btn-small" href="{{ url_for('messagerie_conversation', contact_id=s['reserved_by']) }}">Écrire</a>
+                {% if it and it['invoice_number'] %}<a class="btn btn-secondary btn-small" href="{{ url_for('telecharger_facture', order_id=it['order_id']) }}">Justificatif</a>{% endif %}
+              {% endif %}
+              {% if cancellable.get(s['id']) %}
+                {{ m.post_button(url_for('prof_annuler_creneau', slot_id=s['id']), 'Annuler', 'btn btn-danger btn-small',
+                   "Annuler cette séance ? L'élève sera remboursé intégralement.") }}
+              {% endif %}
+            </div>
+          </td>
+        </tr>
       {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  <p class="muted">Aucune séance réservée pour le moment.</p>
+{% endif %}
 
-      <div class="course-meta">
-        <span class="mono" style="font-size:0.78rem;color:var(--text-muted);">
-          {{ course_slots|selectattr('reserved_by')|list|length }} / {{ course_slots|length }} créneau(x) réservé(s)
-        </span>
-        <form method="post" action="{{ url_for('prof_supprimer', course_id=c['id']) }}" onsubmit="return confirm('Supprimer ce cours ?');">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <button class="btn-danger-outline">Supprimer</button>
-        </form>
-      </div>
+<h2>Mes cours</h2>
+{% for c in courses %}
+  {% set slots = slots_map.get(c['id'], []) %}
+  <article class="course">
+    <div class="course-head">
+      <h3 class="entry-title">{{ c['title'] }}</h3>
+      <p class="price">{% if c['price_cents'] %}{{ c['price_cents']|euros }} <span>la séance</span>{% else %}Gratuit{% endif %}</p>
     </div>
-    {% endfor %}
-  </div>
-  {% else %}
-  <div class="empty-state">
-    Vous n'avez pas encore créé de cours.
-    <div><a class="btn btn-gold" href="{{ url_for('prof_creer') }}">Créer mon premier cours</a></div>
-  </div>
-  {% endif %}
+    <p class="meta">{{ c['subject'] }} · {{ c['level'] }} · {{ MODE_LABELS.get(c['mode'], c['mode']) }}{% if c['city'] %} ({{ c['city'] }}){% endif %}
+      · {{ slots|selectattr('reserved_by')|list|length }}/{{ slots|length }} créneau(x) réservé(s)</p>
+    <ul class="slot-list">
+      {% for s in slots %}
+        <li>
+          <span{% if seance_terminee(s) %} class="muted"{% endif %}>{{ s|creneau_fr }} · {{ s['duration_minutes']|duree }}
+            · {% if s['reserved_by'] %}{{ s['student_name'] or 'réservé' }}{% elif seance_commencee(s) %}non réservé{% else %}libre{% endif %}</span>
+          {% if not s['reserved_by'] and not seance_commencee(s) %}
+            {{ m.post_button(url_for('prof_annuler_creneau', slot_id=s['id']), 'Retirer', 'link-button danger small') }}
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+    {{ m.post_button(url_for('prof_supprimer', course_id=c['id']), 'Supprimer le cours', 'btn btn-danger btn-small',
+       'Supprimer ce cours ? Les élèves ayant réservé une séance à venir seront remboursés.') }}
+  </article>
+{% else %}
+  <p>Vous n'avez pas encore publié de cours.</p>
+{% endfor %}
 {% endblock %}

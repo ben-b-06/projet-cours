@@ -1,504 +1,59 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Visio · {{ SITE_NAME }}{% endblock %}
+{% block head %}<script src="{{ url_for('static', filename='visio.js') }}" defer></script>{% endblock %}
 {% block content %}
-  <span class="eyebrow">Visioconférence</span>
-  <div class="row-between" style="margin-bottom:0.6rem;">
-    <h2 style="font-size:1.4rem;margin:0;">{{ course['title'] }}</h2>
+<h1>{{ course['title'] }}</h1>
+<p class="muted">{{ slot|creneau_fr }} · avec {{ partner['name'] }}. Autorisez l'accès à la caméra et au micro quand le navigateur le demande.
+  L'appel est direct entre vos deux navigateurs : il n'est ni enregistré ni stocké par le site.</p>
+
+<p class="visio-status" id="visioStatus" role="status">Appel non démarré.</p>
+<div class="visio-grid">
+  <div class="video"><video id="remoteVideo" autoplay playsinline></video><span>{{ partner['name'] }}</span></div>
+  <div class="video"><video id="localVideo" autoplay playsinline muted></video><span>Vous</span></div>
+</div>
+<p class="actions">
+  <button class="btn" id="startBtn" type="button">Démarrer l'appel</button>
+  <button class="btn btn-danger" id="leaveBtn" type="button" hidden>Raccrocher</button>
+  <button class="btn btn-secondary" id="muteBtn" type="button" hidden>Couper le micro</button>
+  <button class="btn btn-secondary" id="camBtn" type="button" hidden>Couper la caméra</button>
+</p>
+
+<section class="box">
+  <h2>Tableau partagé</h2>
+  <div class="wb-toolbar">
+    <span>
+      <button type="button" class="swatch sw-black" data-color="#1f2937" aria-pressed="true" aria-label="Noir"></button>
+      <button type="button" class="swatch sw-red" data-color="#c62828" aria-pressed="false" aria-label="Rouge"></button>
+      <button type="button" class="swatch sw-blue" data-color="#1e5fbf" aria-pressed="false" aria-label="Bleu"></button>
+      <button type="button" class="swatch sw-green" data-color="#2e7d32" aria-pressed="false" aria-label="Vert"></button>
+      <button type="button" class="swatch sw-orange" data-color="#d97706" aria-pressed="false" aria-label="Orange"></button>
+    </span>
+    <span><label for="wbWidth">Épaisseur</label><input type="range" id="wbWidth" min="1" max="20" value="3"></span>
+    <span class="actions">
+      <button type="button" class="btn btn-secondary btn-small" id="wbErase" aria-pressed="false">Gomme</button>
+      <button type="button" class="btn btn-secondary btn-small" id="wbUndo">Annuler mon dernier trait</button>
+      <button type="button" class="btn btn-danger btn-small" id="wbClear">Tout effacer</button>
+    </span>
   </div>
-  <p style="color:var(--text-muted);font-size:0.9rem;margin:0 0 1.4rem;">
-    Créneau du {{ slot['slot_date'] }} à {{ slot['slot_time'] }} · Appel avec <strong>{{ partner['name'] }}</strong>. Autorisez l'accès à votre caméra et votre micro pour commencer.
-  </p>
+  <div class="wb-canvas"><canvas id="wbCanvas"></canvas></div>
+</section>
 
-  <div class="visio-status" id="visioStatus">En attente de démarrage…</div>
-
-  <div class="visio-grid">
-    <div class="visio-video-wrap">
-      <video id="remoteVideo" autoplay playsinline></video>
-      <span class="visio-video-label">{{ partner['name'] }}</span>
-    </div>
-    <div class="visio-video-wrap visio-video-wrap-local">
-      <video id="localVideo" autoplay playsinline muted></video>
-      <span class="visio-video-label">Vous</span>
-    </div>
-  </div>
-
-  <div class="visio-controls">
-    <button class="btn btn-gold" id="startBtn">Démarrer l'appel</button>
-    <button class="btn btn-danger-outline" id="leaveBtn" style="display:none;">Quitter l'appel</button>
-    <button class="btn btn-outline" id="muteBtn" style="display:none;">Couper le micro</button>
-    <button class="btn btn-outline" id="camBtn" style="display:none;">Couper la caméra</button>
-  </div>
-
-  <div class="card whiteboard-card">
-    <div class="visio-chat-header">Tableau blanc partagé</div>
-    <div class="whiteboard-toolbar">
-      <div class="whiteboard-tool-group">
-        <label>Couleur</label>
-        <div class="whiteboard-colors" id="whiteboardColors">
-          <button type="button" class="whiteboard-color-swatch active" style="background:#1f2937;" data-color="#1f2937" aria-label="Noir"></button>
-          <button type="button" class="whiteboard-color-swatch" style="background:#dc2626;" data-color="#dc2626" aria-label="Rouge"></button>
-          <button type="button" class="whiteboard-color-swatch" style="background:#2563eb;" data-color="#2563eb" aria-label="Bleu"></button>
-          <button type="button" class="whiteboard-color-swatch" style="background:#16a34a;" data-color="#16a34a" aria-label="Vert"></button>
-          <button type="button" class="whiteboard-color-swatch" style="background:#d4a017;" data-color="#d4a017" aria-label="Or"></button>
-        </div>
+<section class="box chat-box conversation">
+  <h2>Discussion</h2>
+  <div class="thread" id="chatBubbles">
+    {% for msg in chat_messages %}
+      <div class="msg {{ 'msg-mine' if msg['sender_id'] == current_user['id'] else '' }}">
+        <p>{{ msg['body'] }}</p><span class="msg-meta">{{ msg['created_at']|date_fr }}</span>
       </div>
-      <div class="whiteboard-tool-group">
-        <label for="whiteboardWidth">Épaisseur</label>
-        <input type="range" id="whiteboardWidth" class="whiteboard-width" min="1" max="20" value="3">
-      </div>
-      <div class="whiteboard-tool-group">
-        <button type="button" class="btn btn-outline" id="whiteboardEraseBtn">Gomme</button>
-        <button type="button" class="btn btn-outline" id="whiteboardUndoBtn">Annuler mon dernier trait</button>
-        <button type="button" class="btn btn-danger-outline" id="whiteboardClearBtn">Tout effacer</button>
-      </div>
-    </div>
-    <div class="whiteboard-canvas-wrap">
-      <canvas id="whiteboardCanvas"></canvas>
-    </div>
+    {% endfor %}
   </div>
+  <form id="chatForm" class="compose">
+    <label for="chatInput">Message</label>
+    <textarea id="chatInput" rows="2" maxlength="4000" required></textarea>
+    <button class="btn btn-small" type="submit">Envoyer</button>
+  </form>
+</section>
 
-  <div class="card visio-chat">
-    <div class="visio-chat-header">Discuter avec {{ partner['name'] }}</div>
-    <div class="visio-chat-bubbles" id="chatBubbles">
-      {% for m in chat_messages %}
-        <div class="msg-bubble {{ 'mine' if m['sender_id'] == current_user['id'] else 'theirs' }}">
-          <p>{{ m['body'] }}</p>
-          <span class="msg-time">{{ m['created_at'] }}</span>
-        </div>
-      {% endfor %}
-    </div>
-    <form class="visio-chat-form" id="chatForm">
-      <textarea id="chatInput" rows="1" placeholder="Écrivez un message pendant l'appel…" required></textarea>
-      <button class="btn btn-gold" type="submit">Envoyer</button>
-    </form>
-  </div>
-
-  <script>
-    const courseId = {{ course['id'] }};
-    const sendUrl = "{{ url_for('visio_envoyer', course_id=course['id'], slot_id=slot['id']) }}";
-    const pollUrl = "{{ url_for('visio_recevoir', course_id=course['id'], slot_id=slot['id']) }}";
-    const chatSendUrl = "{{ url_for('visio_chat_envoyer', course_id=course['id'], slot_id=slot['id']) }}";
-    const chatPollUrl = "{{ url_for('visio_chat_recevoir', course_id=course['id'], slot_id=slot['id']) }}";
-    const myUserId = {{ current_user['id'] }};
-
-    const chatBubbles = document.getElementById('chatBubbles');
-    const chatForm = document.getElementById('chatForm');
-    const chatInput = document.getElementById('chatInput');
-    let lastChatId = {{ (chat_messages[-1]['id'] if chat_messages else 0) }};
-
-    function addChatBubble(body, time, mine) {
-      const div = document.createElement('div');
-      div.className = 'msg-bubble ' + (mine ? 'mine' : 'theirs');
-      const p = document.createElement('p');
-      p.textContent = body;
-      const span = document.createElement('span');
-      span.className = 'msg-time';
-      span.textContent = time;
-      div.appendChild(p);
-      div.appendChild(span);
-      chatBubbles.appendChild(div);
-      chatBubbles.scrollTop = chatBubbles.scrollHeight;
-    }
-
-    chatBubbles.scrollTop = chatBubbles.scrollHeight;
-
-    chatForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const body = chatInput.value.trim();
-      if (!body) return;
-      chatInput.value = '';
-      try {
-        const res = await fetch(chatSendUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body: JSON.stringify({ body }),
-        });
-        const data = await res.json();
-        if (data && data.message) {
-          lastChatId = Math.max(lastChatId, data.message.id);
-          addChatBubble(data.message.body, data.message.created_at, true);
-        }
-      } catch (e) { /* on réessaiera au prochain envoi */ }
-    });
-
-    async function pollChat() {
-      try {
-        const res = await fetch(`${chatPollUrl}?since=${lastChatId}`, { credentials: 'same-origin' });
-        const data = await res.json();
-        for (const m of (data.messages || [])) {
-          lastChatId = Math.max(lastChatId, m.id);
-          addChatBubble(m.body, m.created_at, m.sender_id === myUserId);
-        }
-      } catch (e) { /* silencieux : on réessaiera au prochain tick */ }
-    }
-
-    setInterval(pollChat, 2000);
-
-    // --- Tableau blanc numérique partagé ---------------------------------
-    const whiteboardDrawUrl = "{{ url_for('visio_tableau_dessiner', course_id=course['id'], slot_id=slot['id']) }}";
-    const whiteboardPollUrl = "{{ url_for('visio_tableau_recevoir', course_id=course['id'], slot_id=slot['id']) }}";
-    const whiteboardUndoUrl = "{{ url_for('visio_tableau_annuler', course_id=course['id'], slot_id=slot['id']) }}";
-
-    const wbCanvas = document.getElementById('whiteboardCanvas');
-    const wbCtx = wbCanvas.getContext('2d');
-    const wbColorButtons = document.querySelectorAll('.whiteboard-color-swatch');
-    const wbWidthInput = document.getElementById('whiteboardWidth');
-    const wbEraseBtn = document.getElementById('whiteboardEraseBtn');
-    const wbUndoBtn = document.getElementById('whiteboardUndoBtn');
-    const wbClearBtn = document.getElementById('whiteboardClearBtn');
-
-    let wbColor = '#1f2937';
-    let wbMode = 'draw'; // 'draw' ou 'erase'
-    let wbDrawing = false;
-    let wbCurrentPoints = []; // points normalisés (0..1) du trait en cours
-    let wbLastSyncId = 0;
-    let wbHistory = []; // {id, kind, sender_id, data}
-
-    function resizeWhiteboardCanvas() {
-      const rect = wbCanvas.getBoundingClientRect();
-      const ratio = window.devicePixelRatio || 1;
-      wbCanvas.width = Math.max(1, Math.round(rect.width * ratio));
-      wbCanvas.height = Math.max(1, Math.round(rect.height * ratio));
-      redrawWhiteboard();
-    }
-
-    function pointToCanvas(nx, ny) {
-      return [nx * wbCanvas.width, ny * wbCanvas.height];
-    }
-
-    function drawStrokeData(data) {
-      const pts = data.points || [];
-      if (pts.length < 1) return;
-      wbCtx.save();
-      wbCtx.lineJoin = 'round';
-      wbCtx.lineCap = 'round';
-      wbCtx.lineWidth = (data.width || 3) * (wbCanvas.width / (wbCanvas.getBoundingClientRect().width || 1));
-      if (data.mode === 'erase') {
-        wbCtx.globalCompositeOperation = 'destination-out';
-        wbCtx.strokeStyle = 'rgba(0,0,0,1)';
-      } else {
-        wbCtx.globalCompositeOperation = 'source-over';
-        wbCtx.strokeStyle = data.color || '#1f2937';
-      }
-      wbCtx.beginPath();
-      const [sx, sy] = pointToCanvas(pts[0][0], pts[0][1]);
-      wbCtx.moveTo(sx, sy);
-      if (pts.length === 1) {
-        // Simple point (clic sans glisser) : petit rond pour rester visible.
-        wbCtx.lineTo(sx + 0.01, sy + 0.01);
-      }
-      for (let i = 1; i < pts.length; i++) {
-        const [x, y] = pointToCanvas(pts[i][0], pts[i][1]);
-        wbCtx.lineTo(x, y);
-      }
-      wbCtx.stroke();
-      wbCtx.restore();
-    }
-
-    function redrawWhiteboard() {
-      wbCtx.clearRect(0, 0, wbCanvas.width, wbCanvas.height);
-      for (const entry of wbHistory) {
-        if (entry.kind === 'stroke') drawStrokeData(entry.data);
-      }
-    }
-
-    function setWbColor(color) {
-      wbColor = color;
-      wbMode = 'draw';
-      wbEraseBtn.classList.remove('btn-gold');
-      wbEraseBtn.classList.add('btn-outline');
-      wbColorButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.color === color));
-    }
-
-    wbColorButtons.forEach((btn) => {
-      btn.addEventListener('click', () => setWbColor(btn.dataset.color));
-    });
-
-    wbEraseBtn.addEventListener('click', () => {
-      wbMode = 'erase';
-      wbEraseBtn.classList.remove('btn-outline');
-      wbEraseBtn.classList.add('btn-gold');
-      wbColorButtons.forEach((btn) => btn.classList.remove('active'));
-    });
-
-    function wbPointerToNormalized(evt) {
-      const rect = wbCanvas.getBoundingClientRect();
-      const x = (evt.clientX - rect.left) / rect.width;
-      const y = (evt.clientY - rect.top) / rect.height;
-      return [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
-    }
-
-    async function sendStroke(points, mode, color, width) {
-      try {
-        const res = await fetch(whiteboardDrawUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body: JSON.stringify({ kind: 'stroke', points, mode, color, width }),
-        });
-        const data = await res.json();
-        if (data && data.id) {
-          wbHistory.push({ id: data.id, kind: 'stroke', sender_id: myUserId, data: { points, mode, color, width } });
-          wbLastSyncId = Math.max(wbLastSyncId, data.id);
-        }
-      } catch (e) { /* le trait reste affiché localement ; sera perdu si l'envoi échoue */ }
-    }
-
-    wbCanvas.addEventListener('pointerdown', (evt) => {
-      wbDrawing = true;
-      wbCurrentPoints = [wbPointerToNormalized(evt)];
-      wbCanvas.setPointerCapture(evt.pointerId);
-    });
-
-    wbCanvas.addEventListener('pointermove', (evt) => {
-      if (!wbDrawing) return;
-      const pt = wbPointerToNormalized(evt);
-      wbCurrentPoints.push(pt);
-      // Aperçu local immédiat pendant le tracé, sans attendre le réseau.
-      drawStrokeData({
-        points: wbCurrentPoints.slice(-2),
-        mode: wbMode,
-        color: wbColor,
-        width: parseFloat(wbWidthInput.value),
-      });
-    });
-
-    function finishWbStroke() {
-      if (!wbDrawing) return;
-      wbDrawing = false;
-      if (wbCurrentPoints.length > 0) {
-        sendStroke(wbCurrentPoints, wbMode, wbColor, parseFloat(wbWidthInput.value));
-      }
-      wbCurrentPoints = [];
-    }
-
-    wbCanvas.addEventListener('pointerup', finishWbStroke);
-    wbCanvas.addEventListener('pointercancel', finishWbStroke);
-    wbCanvas.addEventListener('pointerleave', () => { if (wbDrawing) finishWbStroke(); });
-
-    wbClearBtn.addEventListener('click', async () => {
-      wbHistory = [];
-      redrawWhiteboard();
-      try {
-        const res = await fetch(whiteboardDrawUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body: JSON.stringify({ kind: 'clear' }),
-        });
-        const data = await res.json();
-        if (data && data.id) wbLastSyncId = Math.max(wbLastSyncId, data.id);
-      } catch (e) { /* le tableau reste effacé localement ; se resynchronisera au prochain poll */ }
-    });
-
-    wbUndoBtn.addEventListener('click', async () => {
-      try {
-        const res = await fetch(whiteboardUndoUrl, {
-          method: 'POST',
-          credentials: 'same-origin',
-        });
-        const data = await res.json();
-        if (data && data.ok) {
-          wbHistory = wbHistory.filter((e) => e.id !== data.target_id);
-          wbLastSyncId = Math.max(wbLastSyncId, data.id);
-          redrawWhiteboard();
-        }
-      } catch (e) { /* réessayer plus tard : le poll ramènera l'état correct */ }
-    });
-
-    async function pollWhiteboard() {
-      try {
-        const res = await fetch(`${whiteboardPollUrl}?since=${wbLastSyncId}`, { credentials: 'same-origin' });
-        const data = await res.json();
-        let needsFullRedraw = false;
-        for (const entry of (data.strokes || [])) {
-          wbLastSyncId = Math.max(wbLastSyncId, entry.id);
-          if (entry.sender_id === myUserId && entry.kind === 'stroke') {
-            // Déjà dessiné localement au moment de l'envoi : on évite un doublon.
-            continue;
-          }
-          if (entry.kind === 'clear') {
-            wbHistory = [];
-            needsFullRedraw = true;
-          } else if (entry.kind === 'undo') {
-            const targetId = entry.data && entry.data.target_id;
-            wbHistory = wbHistory.filter((e) => e.id !== targetId);
-            needsFullRedraw = true;
-          } else if (entry.kind === 'stroke') {
-            wbHistory.push(entry);
-            if (!needsFullRedraw) drawStrokeData(entry.data);
-          }
-        }
-        if (needsFullRedraw) redrawWhiteboard();
-      } catch (e) { /* silencieux : on réessaiera au prochain tick */ }
-    }
-
-    resizeWhiteboardCanvas();
-    window.addEventListener('resize', resizeWhiteboardCanvas);
-    pollWhiteboard();
-    setInterval(pollWhiteboard, 1200);
-
-    const statusEl = document.getElementById('visioStatus');
-    const localVideo = document.getElementById('localVideo');
-    const remoteVideo = document.getElementById('remoteVideo');
-    const startBtn = document.getElementById('startBtn');
-    const leaveBtn = document.getElementById('leaveBtn');
-    const muteBtn = document.getElementById('muteBtn');
-    const camBtn = document.getElementById('camBtn');
-
-    let pc = null;
-    let localStream = null;
-    let lastSignalId = 0;
-    let pollTimer = null;
-    let inCall = false;
-
-    function setStatus(text) { statusEl.textContent = text; }
-
-    async function sendSignal(type, payload) {
-      await fetch(sendUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'same-origin',
-        body: JSON.stringify({ type, payload }),
-      });
-    }
-
-    function createPeerConnection() {
-      const conn = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-      });
-      conn.onicecandidate = (event) => {
-        if (event.candidate) sendSignal('candidate', event.candidate);
-      };
-      conn.ontrack = (event) => {
-        remoteVideo.srcObject = event.streams[0];
-        setStatus('En communication avec {{ partner["name"] }}.');
-      };
-      conn.onconnectionstatechange = () => {
-        if (['disconnected', 'failed', 'closed'].includes(conn.connectionState) && inCall) {
-          setStatus("La connexion a été interrompue.");
-        }
-      };
-      return conn;
-    }
-
-    async function ensureLocalStream() {
-      if (localStream) return localStream;
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localVideo.srcObject = localStream;
-      return localStream;
-    }
-
-    async function startCall() {
-      startBtn.disabled = true;
-      setStatus('Ouverture de la caméra…');
-      try {
-        await ensureLocalStream();
-      } catch (err) {
-        setStatus("Impossible d'accéder à la caméra/micro : " + err.message);
-        startBtn.disabled = false;
-        return;
-      }
-      pc = createPeerConnection();
-      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await sendSignal('offer', offer);
-
-      inCall = true;
-      startBtn.style.display = 'none';
-      leaveBtn.style.display = 'inline-flex';
-      muteBtn.style.display = 'inline-flex';
-      camBtn.style.display = 'inline-flex';
-      setStatus("Appel lancé, en attente de {{ partner['name'] }}…");
-    }
-
-    async function handleOffer(offer) {
-      setStatus('Ouverture de la caméra…');
-      try {
-        await ensureLocalStream();
-      } catch (err) {
-        setStatus("Impossible d'accéder à la caméra/micro : " + err.message);
-        return;
-      }
-      pc = createPeerConnection();
-      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      await sendSignal('answer', answer);
-
-      inCall = true;
-      startBtn.style.display = 'none';
-      leaveBtn.style.display = 'inline-flex';
-      muteBtn.style.display = 'inline-flex';
-      camBtn.style.display = 'inline-flex';
-      setStatus('Connexion en cours…');
-    }
-
-    function endCall(notifyPeer) {
-      if (notifyPeer && inCall) sendSignal('leave', {});
-      if (pc) {
-        pc.close();
-        pc = null;
-      }
-      if (localStream) {
-        localStream.getTracks().forEach((t) => t.stop());
-        localStream = null;
-      }
-      localVideo.srcObject = null;
-      remoteVideo.srcObject = null;
-      inCall = false;
-      startBtn.disabled = false;
-      startBtn.style.display = 'inline-flex';
-      leaveBtn.style.display = 'none';
-      muteBtn.style.display = 'none';
-      camBtn.style.display = 'none';
-      setStatus('Appel terminé.');
-    }
-
-    async function poll() {
-      try {
-        const res = await fetch(`${pollUrl}?since=${lastSignalId}`, { credentials: 'same-origin' });
-        const data = await res.json();
-        for (const sig of (data.signals || [])) {
-          lastSignalId = Math.max(lastSignalId, sig.id);
-          if (sig.type === 'offer' && !inCall) {
-            await handleOffer(sig.payload);
-          } else if (sig.type === 'answer' && pc) {
-            await pc.setRemoteDescription(new RTCSessionDescription(sig.payload));
-          } else if (sig.type === 'candidate' && pc) {
-            try { await pc.addIceCandidate(sig.payload); } catch (e) { /* ignore */ }
-          } else if (sig.type === 'leave') {
-            endCall(false);
-            setStatus("{{ partner['name'] }} a quitté l'appel.");
-          }
-        }
-      } catch (e) { /* silencieux : on réessaiera au prochain tick */ }
-    }
-
-    pollTimer = setInterval(poll, 1500);
-
-    startBtn.addEventListener('click', startCall);
-    leaveBtn.addEventListener('click', () => endCall(true));
-    window.addEventListener('beforeunload', () => { if (inCall) sendSignal('leave', {}); });
-
-    muteBtn.addEventListener('click', () => {
-      if (!localStream) return;
-      const track = localStream.getAudioTracks()[0];
-      if (!track) return;
-      track.enabled = !track.enabled;
-      muteBtn.textContent = track.enabled ? 'Couper le micro' : 'Réactiver le micro';
-    });
-
-    camBtn.addEventListener('click', () => {
-      if (!localStream) return;
-      const track = localStream.getVideoTracks()[0];
-      if (!track) return;
-      track.enabled = !track.enabled;
-      camBtn.textContent = track.enabled ? 'Couper la caméra' : 'Réactiver la caméra';
-    });
-  </script>
+<script type="application/json" id="visio-config">{{ visio_config|tojson }}</script>
 {% endblock %}

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Anciens soldes · Administration{% endblock %}
+{% block content %}
+<h1>Ancien porte-monnaie : montants à solder</h1>
+<div class="notice notice-warn">
+  <p>L'ancien système conservait de l'argent pour le compte des utilisateurs (porte-monnaie, séquestre, retraits), ce qui est réservé
+    aux établissements agréés. Il est désactivé. Pour chaque ligne ci-dessous, restituez l'argent hors du site
+    (remboursement de la recharge depuis le tableau de bord Stripe, ou virement), puis marquez la ligne comme réglée.</p>
+</div>
+
+<h2>Soldes restants</h2>
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>Utilisateur</th><th>E-mail</th><th>Rôle</th><th class="num">Solde</th><th></th></tr></thead>
+  <tbody>
+  {% for u in balances %}
+    <tr>
+      <td>{{ u['name'] }}</td><td>{{ u['email'] }}</td><td>{{ u['role'] }}</td><td class="num">{{ u['wallet_cents']|euros }}</td>
+      <td>{{ m.post_button(url_for('admin_ancien_solde_regler', user_id=u['id']), 'Marquer comme réglé', 'btn btn-secondary btn-small', 'Confirmez-vous avoir restitué ce montant ?') }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">Aucun solde restant.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+
+<h2>Paiements encore en séquestre</h2>
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>N°</th><th>Élève</th><th>Professeur</th><th class="num">Montant</th><th>Libérable le</th><th></th></tr></thead>
+  <tbody>
+  {% for p in held %}
+    <tr>
+      <td>{{ p['id'] }}</td><td>{{ p['student_name'] }}</td><td>{{ p['teacher_name'] }}</td><td class="num">{{ p['amount_cents']|euros }}</td><td>{{ p['release_at'] }}</td>
+      <td><div class="actions">
+        <form method="post" action="{{ url_for('admin_ancien_paiement_regler', payment_id=p['id']) }}" class="inline" data-confirm="Le professeur a-t-il bien été payé hors du site ?">
+          {{ m.csrf() }}<input type="hidden" name="outcome" value="released"><button class="btn btn-secondary btn-small" type="submit">Versé au professeur</button>
+        </form>
+        <form method="post" action="{{ url_for('admin_ancien_paiement_regler', payment_id=p['id']) }}" class="inline" data-confirm="L'élève a-t-il bien été remboursé hors du site ?">
+          {{ m.csrf() }}<input type="hidden" name="outcome" value="refunded"><button class="btn btn-secondary btn-small" type="submit">Remboursé à l'élève</button>
+        </form>
+      </div></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="muted">Aucun paiement en séquestre.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+
+<h2>Demandes de retrait en attente</h2>
+<div class="table-wrap"><table class="data">
+  <thead><tr><th>Date</th><th>Utilisateur</th><th class="num">Montant</th><th>Coordonnées indiquées</th><th></th></tr></thead>
+  <tbody>
+  {% for w in withdrawals %}
+    <tr>
+      <td class="nowrap">{{ w['created_at']|date_fr }}</td><td>{{ w['user_name'] }}<br><span class="small muted">{{ w['user_email'] }}</span></td>
+      <td class="num">{{ w['amount_cents']|euros }}</td><td>{{ w['details'] }}</td>
+      <td><div class="actions">
+        {{ m.post_button(url_for('admin_ancien_retrait', withdrawal_id=w['id'], action='payer'), 'Marquer payé', 'btn btn-secondary btn-small', 'Ce retrait a-t-il bien été versé ?') }}
+        {{ m.post_button(url_for('admin_ancien_retrait', withdrawal_id=w['id'], action='refuser'), 'Refuser', 'btn btn-danger btn-small', 'Refuser ce retrait ? Le montant revient sur le solde à restituer.') }}
+      </div></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">Aucune demande en attente.</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}

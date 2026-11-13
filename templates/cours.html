@@ -1,160 +1,103 @@
 {% extends "base.html" %}
-{% import "_macros.html" as macros %}
+{% import "_macros.html" as m %}
+{% block title %}Cours disponibles · {{ SITE_NAME }}{% endblock %}
 {% block content %}
-  <div class="section-title">
-    <div>
-      <span class="eyebrow">Accueil / Liste des cours</span>
-      <h2>Cours disponibles</h2>
-    </div>
-  </div>
-  <p style="color:var(--text-muted);font-size:0.9rem;margin:-0.6rem 0 1.4rem;">
-    Réservez un ou plusieurs créneaux précis avec le prof de votre choix : chaque créneau réservé n'apparaît plus pour les autres élèves.
-  </p>
+<h1>Cours disponibles</h1>
+<p class="view-switch">
+  <a href="{{ url_for('cours', **filters) }}" aria-current="page">Liste</a> ·
+  <a href="{{ url_for('cours_calendrier', **filters) }}">Calendrier</a>
+</p>
 
-  <div class="row-between" style="margin-bottom:1rem;flex-wrap:wrap;gap:0.6rem;">
-    <div style="display:flex;gap:0.5rem;">
-      <a class="btn btn-gold" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours', **filters) }}">{{ macros.icon('list') }} Liste</a>
-      <a class="btn btn-outline" style="padding:0.5rem 0.9rem;" href="{{ url_for('cours_calendrier', **filters) }}">{{ macros.icon('calendar') }} Calendrier</a>
-    </div>
-  </div>
+{% include "_filtres.html" %}
 
-  <form method="get" action="{{ url_for('cours') }}" class="card filter-bar">
-    <div class="field">
-      <label for="q">Recherche</label>
-      <input type="text" id="q" name="q" placeholder="Titre ou description…" value="{{ filters.q }}">
-    </div>
-    <div class="field">
-      <label for="subject">Matière</label>
-      <select id="subject" name="subject">
-        <option value="">Toutes</option>
-        {% for m in matieres %}
-        <option value="{{ m }}" {{ 'selected' if filters.subject == m else '' }}>{{ m }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="field">
-      <label for="level">Niveau</label>
-      <select id="level" name="level">
-        <option value="">Tous</option>
-        {% for n in niveaux %}
-        <option value="{{ n }}" {{ 'selected' if filters.level == n else '' }}>{{ n }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="field">
-      <label for="mode">Modalité</label>
-      <select id="mode" name="mode" onchange="document.getElementById('cityFilterField').style.display = (this.value === 'presentiel') ? '' : 'none';">
-        <option value="">Toutes</option>
-        <option value="en_ligne" {{ 'selected' if filters.mode == 'en_ligne' else '' }}>En ligne</option>
-        <option value="presentiel" {{ 'selected' if filters.mode == 'presentiel' else '' }}>En présentiel</option>
-      </select>
-    </div>
-    <div class="field" id="cityFilterField" style="{{ '' if filters.mode == 'presentiel' else 'display:none;' }}">
-      <label for="city">Ville</label>
-      <input type="text" id="city" name="city" placeholder="Ex. Lyon" value="{{ filters.city }}">
-    </div>
-    <div class="field">
-      <label for="teacher_id">Professeur</label>
-      <select id="teacher_id" name="teacher_id">
-        <option value="">Tous</option>
-        {% for t in teachers %}
-        <option value="{{ t['id'] }}" {{ 'selected' if filters.teacher_id == t['id']|string else '' }}>{{ t['name'] }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="field">
-      <label for="min_rating">Note min. du prof</label>
-      <select id="min_rating" name="min_rating">
-        <option value="">Toutes</option>
-        {% for note in [4, 3, 2, 1] %}
-        <option value="{{ note }}" {{ 'selected' if filters.min_rating == note|string else '' }}>{{ '★' * note }}{{ '☆' * (5 - note) }} et plus</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="field">
-      <button class="btn btn-gold" type="submit">Filtrer</button>
-    </div>
-  </form>
+<p class="small muted">Classement : les cours publiés le plus récemment apparaissent en premier. Aucun professeur ne paie pour être mieux placé.
+  Les avis sont vérifiés : seul un élève ayant suivi une séance avec le professeur peut le noter.</p>
 
-  {% if courses %}
-  <div class="course-grid">
-    {% for c in courses %}
-    {% set course_slots = slots_map.get(c['id'], []) %}
-    {% set free_slots = course_slots|selectattr('reserved_by', 'none')|list %}
-    <div class="card course-card" id="course-{{ c['id'] }}">
-      <span class="course-cat">{{ c['subject'] }} · {{ c['level'] }}</span>
-      <h3>{{ c['title'] }} <span style="font-size:0.85rem;color:var(--gold,#b8860b);font-weight:600;">— {{ c['price_cents']|euros }} / séance</span></h3>
-      <p class="course-desc">{{ c['description'] }}</p>
-      <p style="font-size:0.8rem;color:var(--text-muted);margin:-0.4rem 0 0.6rem;">
-        {% if c['mode'] == 'en_ligne' %}{{ macros.icon('video') }} En ligne
-        {% elif c['mode'] == 'presentiel' %}{{ macros.icon('pin') }} En présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
-        {% else %}{{ macros.icon('video') }}{{ macros.icon('pin') }} En ligne ou en présentiel{{ ' · ' + c['city'] if c['city'] else '' }}
-        {% endif %}
-      </p>
+{% for c in courses %}
+  {% set slots = slots_map.get(c['id'], []) %}
+  {% set is_pro = c['teacher_status'] in PRO_STATUSES %}
+  <article class="course" id="cours-{{ c['id'] }}">
+    <div class="course-head">
+      <h2>{{ c['title'] }}</h2>
+      <p class="price">{% if c['price_cents'] %}{{ c['price_cents']|euros }} <span>TTC la séance</span>{% else %}Gratuit{% endif %}</p>
+    </div>
+    <p class="meta">
+      {{ c['subject'] }} · {{ c['level'] }} · {{ MODE_LABELS.get(c['mode'], c['mode']) }}{% if c['city'] and c['mode'] != 'en_ligne' %} ({{ c['city'] }}){% endif %}
+    </p>
+    <p>{{ c['description'] }}</p>
 
-      {% set tr = ratings_map.get(c['teacher_id']) %}
-      <div class="teacher-line">
-        {{ macros.avatar(c['teacher_name'], c['teacher_photo'], 32) }}
-        <div>
-          <span class="teacher-name">{{ c['teacher_name'] }}</span>
-          {% if c['teacher_education_level'] %}
-            <span class="mono" style="font-size:0.72rem;color:var(--text-muted);display:block;">{{ c['teacher_education_level'] }}</span>
-          {% endif %}
-          {% if tr %}
-            <span class="teacher-rating" title="{{ tr.count }} note(s)">★ {{ '%.1f'|format(tr.avg) }}<span class="teacher-rating-count"> ({{ tr.count }})</span></span>
-          {% else %}
-            <span class="teacher-rating teacher-rating-empty">Pas encore noté</span>
-          {% endif %}
-          {% if c['teacher_bio'] %}
-            <p class="teacher-bio">{{ c['teacher_bio'] }}</p>
-          {% endif %}
-        </div>
+    <div class="teacher">
+      {{ m.avatar(c['teacher_name'], c['teacher_photo'], 48) }}
+      <div>
+        <span class="teacher-name">{{ c['teacher_name'] }}</span>
+        <p class="muted">
+          {{ m.teacher_status(c['teacher_status'], c['teacher_siret']) }}{% if c['teacher_education_level'] %} · {{ c['teacher_education_level'] }}{% endif %}
+          · {{ m.rating(ratings_map.get(c['teacher_id'])) }}
+        </p>
+        {% if c['teacher_bio'] %}<p>{{ c['teacher_bio'] }}</p>{% endif %}
       </div>
+    </div>
 
-      {% if current_user and current_user['role'] == 'etudiant' and free_slots %}
-        <form method="post" action="{{ url_for('inscription_cours', course_id=c['id']) }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <ul class="slot-list slot-list-picker">
-            {% for s in course_slots %}
+    {% if current_user and current_user['role'] == 'etudiant' %}
+      <form method="post" action="{{ url_for('reserver', course_id=c['id']) }}" class="booking">
+        {{ m.csrf() }}
+        <fieldset>
+          <legend>Créneaux</legend>
+          <ul class="slot-list">
+            {% for s in slots %}
               <li>
-                <label class="slot-pick {{ 'is-taken' if s['reserved_by'] and s['reserved_by'] != current_user['id'] else '' }} {{ 'is-mine' if s['reserved_by'] == current_user['id'] else '' }}">
-                  {% if not s['reserved_by'] %}
-                    <input type="checkbox" name="slot_id[]" value="{{ s['id'] }}">
-                  {% endif %}
-                  <span class="slot-date">{{ s['slot_date'] }}</span> · {{ s['slot_time'] }} · {{ s['duration_minutes']|duree_lisible }}
-                  {% if s['reserved_by'] == current_user['id'] %}
-                    <span class="slot-status slot-status-reserved">Réservé par vous</span>
-                  {% elif s['reserved_by'] %}
-                    <span class="slot-status slot-status-reserved">Complet</span>
-                  {% elif c['mode'] == 'les_deux' %}
-                    <select name="slot_mode_{{ s['id'] }}" style="margin-left:0.5rem;font-size:0.78rem;">
+                {% if s['id'] in bookable %}
+                  <label class="check"><input type="checkbox" name="slot_id[]" value="{{ s['id'] }}"> {{ s|creneau_fr }} · {{ s['duration_minutes']|duree }}</label>
+                  {% if c['mode'] == 'les_deux' %}
+                    <select name="slot_mode_{{ s['id'] }}" aria-label="Modalité du créneau">
                       <option value="en_ligne">En ligne</option>
-                      <option value="presentiel">En présentiel{{ ' (' + c['city'] + ')' if c['city'] else '' }}</option>
+                      <option value="presentiel">En présentiel{% if c['city'] %} ({{ c['city'] }}){% endif %}</option>
                     </select>
                   {% endif %}
-                </label>
+                {% elif s['reserved_by'] == current_user['id'] %}
+                  <span>{{ s|creneau_fr }} · réservé par vous</span>
+                {% else %}
+                  <span class="muted">{{ s|creneau_fr }} · {{ 'complet' if s['reserved_by'] else 'trop tard pour réserver' }}</span>
+                {% endif %}
               </li>
             {% endfor %}
           </ul>
-          <div class="field" style="margin-top:0.6rem;">
-            <label>Sujets à travailler avec le prof (optionnel)</label>
-            <textarea name="notes" rows="2" placeholder="Ex. : révision des fractions, méthodologie de la dissertation…"></textarea>
-          </div>
-          <button class="btn btn-sage" type="submit" style="font-size:0.8rem;padding:0.45rem 0.8rem;">Réserver les créneaux sélectionnés</button>
-        </form>
-      {% else %}
-        {{ macros.slot_list(course_slots) }}
-      {% endif %}
+        </fieldset>
+        <div class="field">
+          <label for="notes-{{ c['id'] }}">Ce que vous aimeriez travailler <span class="muted">(facultatif)</span></label>
+          <textarea id="notes-{{ c['id'] }}" name="notes" rows="2" maxlength="500"></textarea>
+        </div>
 
-      <div class="course-meta">
-        {% if not current_user %}
-          <a class="btn btn-outline" style="font-size:0.78rem;padding:0.45rem 0.8rem;" href="{{ url_for('connexion') }}">Se connecter pour réserver</a>
+        {% if c['price_cents'] %}
+          <p class="legal-text">Paiement par carte sur la page sécurisée de Stripe. Le montant est encaissé pour le compte du professeur,
+            qui reverse une commission de {{ PLATFORM_FEE_PERCENT }} % à la plateforme (déjà incluse dans le prix affiché).
+            Annulation gratuite et remboursement intégral jusqu'à 12 heures avant la séance.</p>
+          {% if is_pro %}
+            <label class="check legal-text"><input type="checkbox" name="waiver" value="1" required>
+              <span>Je demande que les séances puissent avoir lieu avant la fin du délai de rétractation de 14 jours.
+              Je reste libre de me rétracter et d'être remboursé tant que la séance n'a pas commencé ; une fois une séance entièrement donnée,
+              je ne peux plus me rétracter pour celle-ci.</span></label>
+          {% else %}
+            <p class="legal-text">Ce professeur est un particulier : le droit de rétractation du Code de la consommation ne s'applique pas
+              à cette prestation. Les conditions d'annulation de la plateforme s'appliquent.</p>
+          {% endif %}
         {% endif %}
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-  {% else %}
-  <div class="empty-state">Aucun cours disponible pour le moment — repassez bientôt !</div>
-  {% endif %}
+        <label class="check legal-text"><input type="checkbox" name="accept_cgv" value="1" required>
+          <span>J'ai lu et j'accepte les <a href="{{ url_for('cgv') }}">conditions générales de vente</a>.</span></label>
+        <button class="btn" type="submit">{{ 'Réserver avec obligation de paiement' if c['price_cents'] else 'Réserver' }}</button>
+      </form>
+    {% else %}
+      <ul class="slot-list">
+        {% for s in slots %}
+          <li><span{% if s['reserved_by'] %} class="muted"{% endif %}>{{ s|creneau_fr }} · {{ s['duration_minutes']|duree }}{% if s['reserved_by'] %} · complet{% endif %}</span></li>
+        {% endfor %}
+      </ul>
+      {% if not current_user %}
+        <p><a href="{{ url_for('connexion') }}">Connectez-vous</a> ou <a href="{{ url_for('inscription') }}">créez un compte</a> pour réserver.</p>
+      {% endif %}
+    {% endif %}
+  </article>
+{% else %}
+  <p class="notice">Aucun cours ne correspond à votre recherche pour le moment.</p>
+{% endfor %}
 {% endblock %}

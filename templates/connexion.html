@@ -1,22 +1,23 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Connexion · {{ SITE_NAME }}{% endblock %}
 {% block content %}
-  <span class="eyebrow">Authentification / Connexion</span>
-  <div class="card form-card">
-    <h2 style="font-size:1.4rem;margin:0 0 1.3rem;">Se connecter</h2>
-    <form method="post">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <div class="field">
-        <label>Adresse e-mail</label>
-        <input type="email" name="email" required placeholder="vous@exemple.fr">
-      </div>
-      <div class="field">
-        <label>Mot de passe</label>
-        <input type="password" name="password" required placeholder="••••••••">
-      </div>
-      <button class="btn btn-gold" type="submit" style="width:100%;justify-content:center;">Se connecter</button>
-    </form>
-    <a class="helper-link" href="{{ url_for('inscription') }}">Pas encore de compte ? Créer un compte</a>
-
-
-  </div>
+<div class="form-narrow">
+  <h1>Connexion</h1>
+  <form method="post" class="box">
+    {{ m.csrf() }}
+    <div class="field">
+      <label for="email">Adresse e-mail</label>
+      <input type="email" id="email" name="email" value="{{ email }}" autocomplete="email" maxlength="254" required>
+    </div>
+    <div class="field">
+      <label for="password">Mot de passe</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" maxlength="129" required>
+    </div>
+    <button class="btn" type="submit">Se connecter</button>
+  </form>
+  <p>Pas encore de compte ? <a href="{{ url_for('inscription') }}">Créer un compte</a></p>
+  <p class="small muted">Mot de passe oublié : écrivez à <a href="mailto:{{ LEGAL.contact_email }}">{{ LEGAL.contact_email }}</a>
+    depuis l'adresse de votre compte. Un mot de passe provisoire vous sera communiqué, à changer dès la connexion.</p>
+</div>
 {% endblock %}

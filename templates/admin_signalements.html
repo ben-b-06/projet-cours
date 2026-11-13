@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Signalements · Administration{% endblock %}
+{% block content %}
+<h1>Signalements</h1>
+<p class="small muted">Traitez chaque signalement rapidement et de façon objective (règlement européen sur les services numériques, art. 16).
+  Un contenu manifestement illicite doit être retiré promptement ; en cas de danger pour un mineur, alertez le 119 ou la plateforme
+  PHAROS (internet-signalement.gouv.fr).</p>
+{% for r in reports %}
+  <div class="entry">
+    <div class="entry-head">
+      <span class="entry-title">{{ categories.get(r['category'], r['category']) }}</span>
+      <span>{% if r['status'] == 'open' %}<span class="status status-warn">À traiter</span>{% else %}<span class="status status-off">Clos le {{ r['resolved_at']|date_fr }}</span>{% endif %}</span>
+    </div>
+    <p class="small muted">Reçu le {{ r['created_at']|date_fr }} · {{ r['reporter_name'] or 'Anonyme' }}{% if r['reporter_email'] %} ({{ r['reporter_email'] }}){% endif %}
+      {% if r['order_id'] %} · <a href="{{ url_for('admin_paiements') }}">commande n° {{ r['order_id'] }}</a>{% endif %}</p>
+    {% if r['location'] %}<p class="small">Où : {{ r['location'] }}</p>{% endif %}
+    <p class="msg"><span>{{ r['description'] }}</span></p>
+    {% if r['admin_note'] %}<p class="small">Suite donnée : {{ r['admin_note'] }}</p>{% endif %}
+    {% if r['status'] == 'open' %}
+      <form method="post" action="{{ url_for('admin_signalement_clore', report_id=r['id']) }}" class="actions">
+        {{ m.csrf() }}
+        <label class="small" for="note-{{ r['id'] }}">Suite donnée</label>
+        <input type="text" id="note-{{ r['id'] }}" name="admin_note" maxlength="500" required>
+        <button class="btn btn-secondary btn-small" type="submit">Clore</button>
+      </form>
+    {% endif %}
+  </div>
+{% else %}
+  <p class="muted">Aucun signalement.</p>
+{% endfor %}
+{% endblock %}

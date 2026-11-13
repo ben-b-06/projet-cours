@@ -1,0 +1,49 @@
+<form method="get" action="{{ url_for(request.endpoint) }}" class="filters" role="search">
+  <div class="field field-wide">
+    <label for="f-q">Recherche</label>
+    <input type="search" id="f-q" name="q" value="{{ filters.q }}" maxlength="80" placeholder="Titre, thème…">
+  </div>
+  <div class="field">
+    <label for="f-subject">Matière</label>
+    <select id="f-subject" name="subject">
+      <option value="">Toutes</option>
+      {% for x in matieres %}<option value="{{ x }}"{% if filters.subject == x %} selected{% endif %}>{{ x }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="f-level">Classe</label>
+    <select id="f-level" name="level">
+      <option value="">Toutes</option>
+      {% for x in niveaux %}<option value="{{ x }}"{% if filters.level == x %} selected{% endif %}>{{ x }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="f-mode">Modalité</label>
+    <select id="f-mode" name="mode">
+      <option value="">Toutes</option>
+      <option value="en_ligne"{% if filters.mode == 'en_ligne' %} selected{% endif %}>En ligne</option>
+      <option value="presentiel"{% if filters.mode == 'presentiel' %} selected{% endif %}>En présentiel</option>
+    </select>
+  </div>
+  <div class="field" data-show-when="mode:presentiel">
+    <label for="f-city">Ville</label>
+    <input type="text" id="f-city" name="city" value="{{ filters.city }}" maxlength="80">
+  </div>
+  <div class="field">
+    <label for="f-teacher">Professeur</label>
+    <select id="f-teacher" name="teacher_id">
+      <option value="">Tous</option>
+      {% for t in teachers %}<option value="{{ t['id'] }}"{% if filters.teacher_id == t['id']|string %} selected{% endif %}>{{ t['name'] }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="f-rating">Note minimale</label>
+    <select id="f-rating" name="min_rating">
+      <option value="">Indifférent</option>
+      {% for n in [4, 3, 2] %}<option value="{{ n }}"{% if filters.min_rating == n|string %} selected{% endif %}>{{ n }}/5 et plus</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <button class="btn" type="submit">Filtrer</button>
+  </div>
+</form>

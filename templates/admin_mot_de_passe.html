@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Mot de passe provisoire · Administration{% endblock %}
+{% block content %}
+<div class="form-medium">
+  <h1>Mot de passe provisoire</h1>
+  <p>Compte : <strong>{{ target['name'] }}</strong> ({{ target['email'] }})</p>
+  <p class="box"><code>{{ temporary }}</code></p>
+  <p>Transmettez-le à la personne par un canal sûr, en vérifiant qu'il s'agit bien du titulaire du compte. Il ne sera plus affiché.
+    Elle devra choisir un nouveau mot de passe à sa prochaine connexion, et ses sessions ouvertes ont été déconnectées.</p>
+  <p><a class="btn btn-secondary" href="{{ url_for('admin_dashboard') }}">Retour</a></p>
+</div>
+{% endblock %}

@@ -1,103 +1,84 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Messages · {{ SITE_NAME }}{% endblock %}
 {% block content %}
-  <div class="section-title">
-    <div>
-      <span class="eyebrow">Messagerie</span>
-      <h2>
-        {% if current_user['role'] == 'etudiant' %}Discuter avec un professeur
-        {% elif current_user['role'] == 'prof' %}Discuter avec un élève
-        {% else %}Contacter les professeurs et les élèves
-        {% endif %}
-      </h2>
-    </div>
-  </div>
+<h1>Messages</h1>
+<p class="small muted">Restez courtois et n'échangez pas de coordonnées bancaires. Les messages peuvent être consultés par l'équipe de
+  modération en cas de signalement ou pour la protection des élèves mineurs (voir la <a href="{{ url_for('confidentialite') }}#messagerie">politique de confidentialité</a>).</p>
 
-  {% if current_user['role'] == 'admin' %}
-  <form method="post" action="{{ url_for('messagerie_diffusion') }}" class="card" style="padding:1rem 1.2rem;margin-bottom:1.4rem;display:flex;gap:0.7rem;align-items:flex-end;flex-wrap:wrap;">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-    <div class="field" style="flex:1;min-width:220px;margin-bottom:0;">
-      <label>Message à tout le monde (tous les professeurs et élèves)</label>
-      <textarea name="body" rows="2" placeholder="Écrivez une annonce à diffuser à tous les utilisateurs…" required></textarea>
+{% if current_user['role'] == 'admin' %}
+  <form method="post" action="{{ url_for('messagerie_diffusion') }}" class="box"
+        data-confirm="Envoyer ce message à tous les professeurs et élèves ?">
+    {{ m.csrf() }}
+    <div class="field">
+      <label for="broadcast">Message à tous les utilisateurs</label>
+      <textarea id="broadcast" name="body" rows="2" maxlength="4000" required></textarea>
     </div>
-    <button class="btn btn-gold" type="submit">Envoyer à tous</button>
+    <button class="btn btn-secondary btn-small" type="submit">Envoyer à tous</button>
   </form>
-  {% endif %}
+{% endif %}
 
-  <div class="msg-shell">
-    <div class="msg-list card">
-      {% if contacts %}
+<div class="inbox">
+  <nav aria-label="Conversations">
+    {% if contacts %}
+      <ul class="contacts">
         {% for c in contacts %}
-        <a class="msg-contact {{ 'active' if active_contact and active_contact['id'] == c['id'] else '' }}"
-           href="{{ url_for('messagerie_conversation', contact_id=c['id']) }}">
-          <span class="msg-contact-top">
-            <span class="msg-contact-name">{{ c['name'] }}{% if c['role'] == 'admin' %} (Administrateur){% endif %}</span>
-            {% if c['unread'] %}<span class="msg-badge">{{ c['unread'] }}</span>{% endif %}
-          </span>
-          <span class="msg-contact-preview">
-            {% if c['last'] %}
-              {% if c['last']['body'] %}{{ c['last']['body'][:48] }}{% if c['last']['body']|length > 48 %}…{% endif %}
-              {% elif c['last']['attachment_filename'] %}📎 Pièce jointe
-              {% endif %}
-            {% else %}Aucun message pour le moment{% endif %}
-          </span>
-        </a>
+          <li>
+            <a href="{{ url_for('messagerie_conversation', contact_id=c['id']) }}"{% if active_contact and active_contact['id'] == c['id'] %} aria-current="true"{% endif %}>
+              <strong>{{ c['name'] }}</strong>{% if c['unread'] %} <span class="unread">{{ c['unread'] }} non lu(s)</span>{% endif %}
+              <span class="preview">
+                {%- if c['last'] -%}
+                  {{ c['last']['body'][:60] if c['last']['body'] else 'Pièce jointe' }}
+                {%- else -%}Aucun message{%- endif -%}
+              </span>
+            </a>
+          </li>
         {% endfor %}
-      {% else %}
-        <p class="slot-empty" style="padding:1rem;">
-          {% if current_user['role'] == 'etudiant' %}
-            Réservez un cours avec un professeur pour pouvoir lui écrire.
-          {% elif current_user['role'] == 'prof' %}
-            Aucun élève ne vous a encore réservé de cours.
-          {% else %}
-            Aucun professeur ni élève inscrit pour le moment.
-          {% endif %}
-        </p>
-      {% endif %}
-    </div>
+      </ul>
+    {% else %}
+      <p class="muted">
+        {% if current_user['role'] == 'etudiant' %}Après une réservation, vous pourrez écrire au professeur ici.
+        {% elif current_user['role'] == 'prof' %}Les élèves qui réservent vos séances apparaîtront ici.
+        {% else %}Aucun utilisateur.{% endif %}
+      </p>
+    {% endif %}
+  </nav>
 
-    <div class="msg-thread card">
-      {% if active_contact %}
-        <div class="msg-thread-header">{{ active_contact['name'] }}</div>
-        <div class="msg-bubbles">
-          {% if thread %}
-            {% for m in thread %}
-              <div class="msg-bubble {{ 'mine' if m['sender_id'] == current_user['id'] else 'theirs' }}">
-                {% if m['body'] %}<p>{{ m['body'] }}</p>{% endif %}
-                {% if m['attachment_filename'] %}
-                  {% set attachment_url = url_for('uploaded_message_attachment', message_id=m['id'], filename=m['attachment_filename']) %}
-                  <div class="msg-attachment">
-                    {% if m['attachment_type'] == 'image' %}
-                      <a href="{{ attachment_url }}" target="_blank" rel="noopener">
-                        <img src="{{ attachment_url }}" alt="{{ m['attachment_original_name'] }}" class="msg-attachment-img">
-                      </a>
-                    {% else %}
-                      <a href="{{ attachment_url }}" target="_blank" rel="noopener" class="msg-attachment-file">
-                        <span class="msg-attachment-icon">📄</span>
-                        <span class="msg-attachment-name">{{ m['attachment_original_name'] }}</span>
-                      </a>
-                    {% endif %}
-                  </div>
-                {% endif %}
-                <span class="msg-time">{{ m['created_at'] }}</span>
-              </div>
-            {% endfor %}
-          {% else %}
-            <p class="slot-empty">Aucun message échangé pour l'instant — dites bonjour !</p>
-          {% endif %}
+  <section class="conversation" aria-label="Conversation">
+    {% if active_contact %}
+      <h2>{{ active_name }}</h2>
+      <div class="thread">
+        {% for msg in thread %}
+          <div class="msg {{ 'msg-mine' if msg['sender_id'] == current_user['id'] else '' }}"{% if loop.last %} id="dernier"{% endif %}>
+            {% if msg['body'] %}<p>{{ msg['body'] }}</p>{% endif %}
+            {% if msg['attachment_filename'] %}
+              {% set url = url_for('uploaded_message_attachment', message_id=msg['id'], filename=msg['attachment_filename']) %}
+              {% if msg['attachment_type'] == 'image' %}
+                <a href="{{ url }}" target="_blank" rel="noopener"><img src="{{ url }}" alt="Image jointe : {{ msg['attachment_original_name'] }}"></a>
+              {% else %}
+                <p><a href="{{ url }}">Télécharger {{ msg['attachment_original_name'] }}</a></p>
+              {% endif %}
+            {% endif %}
+            <span class="msg-meta">{{ 'Vous' if msg['sender_id'] == current_user['id'] else active_name }} · {{ msg['created_at']|date_fr }}</span>
+          </div>
+        {% else %}
+          <p class="muted">Aucun message pour l'instant.</p>
+        {% endfor %}
+      </div>
+      <form method="post" action="{{ url_for('messagerie_conversation', contact_id=active_contact['id']) }}" enctype="multipart/form-data" class="compose">
+        {{ m.csrf() }}
+        <label for="body">Votre message</label>
+        <textarea id="body" name="body" rows="3" maxlength="4000"></textarea>
+        <div class="actions">
+          <label class="small" for="attachment">Joindre une image ou un PDF (8 Mo max.)</label>
+          <input type="file" id="attachment" name="attachment" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" data-filename="attachment-name">
+          <span id="attachment-name" class="small muted"></span>
+          <button class="btn" type="submit">Envoyer</button>
         </div>
-        <form method="post" action="{{ url_for('messagerie_conversation', contact_id=active_contact['id']) }}" class="msg-form" enctype="multipart/form-data">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-          <textarea name="body" rows="2" placeholder="Écrivez votre message…"></textarea>
-          <label class="msg-attach-btn" title="Joindre une image ou un PDF">
-            📎
-            <input type="file" name="attachment" accept=".png,.jpg,.jpeg,.webp,.gif,.pdf,image/*,application/pdf" style="display:none;" onchange="this.closest('form').querySelector('.msg-attach-name').textContent = this.files[0] ? this.files[0].name : '';">
-          </label>
-          <span class="msg-attach-name"></span>
-          <button class="btn btn-gold" type="submit">Envoyer</button>
-        </form>
-      {% else %}
-        <div class="empty-state">Sélectionnez un correspondant à gauche pour afficher la conversation.</div>
-      {% endif %}
-    </div>
-  </div>
+      </form>
+    {% else %}
+      <p class="muted">Choisissez une conversation.</p>
+    {% endif %}
+  </section>
+</div>
 {% endblock %}

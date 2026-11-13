@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · {{ SITE_NAME }}{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<p>
+  {% if code == 404 %}Cette page n'existe pas ou vous n'y avez pas accès.
+  {% elif code == 429 %}Vous avez effectué trop de requêtes en peu de temps. Patientez quelques minutes.
+  {% elif code == 500 %}Une erreur est survenue de notre côté. Réessayez dans un instant ; si le problème persiste, écrivez-nous.
+  {% else %}La demande n'a pas pu être traitée.{% endif %}
+</p>
+<p><a href="{{ url_for('presentation') }}">Retour à l'accueil</a></p>
+{% endblock %}

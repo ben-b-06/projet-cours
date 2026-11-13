@@ -1,27 +1,35 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Conversation · Modération{% endblock %}
 {% block content %}
-  <span class="eyebrow">Administration / Messagerie</span>
-  <div class="row-between" style="margin-bottom:1rem;">
-    <h2 style="font-size:1.4rem;margin:0;">{{ student['name'] }} ↔ {{ teacher['name'] }}</h2>
-    <a class="btn btn-outline" href="{{ url_for('admin_messagerie') }}">← Toutes les conversations</a>
-  </div>
-  <p style="color:var(--text-muted);font-size:0.85rem;margin:0 0 1.2rem;">
-    Vue administrateur en lecture seule — vous ne pouvez pas envoyer de message dans cette conversation.
-  </p>
-
-  <div class="msg-thread card" style="max-width:640px;">
-    <div class="msg-thread-header">{{ student['name'] }} ↔ {{ teacher['name'] }}</div>
-    <div class="msg-bubbles">
-      {% if thread %}
-        {% for m in thread %}
-          <div class="msg-bubble {{ 'mine' if m['sender_id'] == teacher['id'] else 'theirs' }}">
-            <p>{{ m['body'] }}</p>
-            <span class="msg-time">{{ 'Élève' if m['sender_id'] == student['id'] else 'Professeur' }} · {{ m['created_at'] }}</span>
-          </div>
-        {% endfor %}
+<p><a href="{{ url_for('admin_messagerie') }}">Retour aux conversations</a></p>
+<h1>{{ student['name'] }} et {{ teacher['name'] }}</h1>
+{% if thread is none %}
+  <form method="post" class="box form-medium">
+    {{ m.csrf() }}
+    <div class="field">
+      <label for="reason">Motif de la consultation</label>
+      <input type="text" id="reason" name="reason" maxlength="500" required>
+      <p class="hint">Par exemple : « signalement n° 12 », « suspicion de demande de paiement hors plateforme ». Le motif est journalisé.</p>
+    </div>
+    <button class="btn" type="submit">Afficher la conversation</button>
+  </form>
+{% else %}
+  <p class="notice">Consultation enregistrée. Motif : {{ reason }}</p>
+  <div class="conversation">
+    <div class="thread">
+      {% for msg in thread %}
+        <div class="msg {{ 'msg-mine' if msg['sender_id'] == teacher['id'] else '' }}">
+          {% if msg['body'] %}<p>{{ msg['body'] }}</p>{% endif %}
+          {% if msg['attachment_filename'] %}
+            <p><a href="{{ url_for('uploaded_message_attachment', message_id=msg['id'], filename=msg['attachment_filename']) }}">Pièce jointe : {{ msg['attachment_original_name'] }}</a></p>
+          {% endif %}
+          <span class="msg-meta">{{ 'Professeur' if msg['sender_id'] == teacher['id'] else 'Élève' }} · {{ msg['created_at']|date_fr }}</span>
+        </div>
       {% else %}
-        <p class="slot-empty">Aucun message échangé pour l'instant.</p>
-      {% endif %}
+        <p class="muted">Aucun message.</p>
+      {% endfor %}
     </div>
   </div>
+{% endif %}
 {% endblock %}
